@@ -88,7 +88,7 @@ In any chat: *"connect to Ads Optimiser"*. Claude will call `adsoptimiser_connec
 | `adsoptimiser_get_pipeline_nodes` | The pipeline node catalogue: node types, inputs, outputs, params, graph rules and an example |
 | `adsoptimiser_get_pipeline` | A saved pipeline's graph, node count and estimated cost per run |
 | `adsoptimiser_validate_pipeline` | Check a pipeline graph: errors by node, node count, estimated cost, whether it needs a prompt (uses no allowance) |
-| `adsoptimiser_save_pipeline` | Save a pipeline graph to the workspace, or update one, and link to the pipeline editor |
+| `adsoptimiser_save_pipeline` | Save a pipeline graph to the workspace, or update a saved one by `graph_id`, and link to the pipeline editor |
 | `adsoptimiser_run_pipeline` | Start a pipeline run from a template, a saved pipeline or an inline graph |
 | `adsoptimiser_get_pipeline_run` | Status and results of each pipeline step |
 | `adsoptimiser_upload_file` | Upload a local image or video and get its hosted URL (uses no allowance) |

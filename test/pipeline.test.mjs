@@ -79,7 +79,13 @@ function fakeApi(r) {
     const body = json();
     const errors = validate(body.graph);
     if (errors.length) return { status: 400, json: { error: "Invalid graph", errors } };
-    return { status: 201, json: { graph_id: body.graph_id ?? "pg_new", name: body.name, description: body.description ?? "", graph: body.graph } };
+    return { status: 201, json: { graph_id: "pg_new", name: body.name, description: body.description ?? "", graph: body.graph } };
+  }
+  if (route === "PATCH /api/v1/pipelines/graphs/pg_1") {
+    const body = json();
+    const errors = validate(body.graph);
+    if (errors.length) return { status: 400, json: { error: "Invalid graph", errors } };
+    return { json: { graph_id: "pg_1", name: body.name, description: body.description ?? "", graph: body.graph } };
   }
   if (route === "GET /api/v1/pipelines/graphs/pg_1") {
     return { json: { graph_id: "pg_1", name: "Sneaker spin", description: "d", graph: GRAPH, updated_at: "2026-09-01T00:00:00Z", estimated_cost_usd: 0.53 } };
@@ -127,6 +133,7 @@ describe("pipeline builder tools", () => {
   });
 
   const posts = (path) => stub.requests.filter((r) => r.method === "POST" && r.path === path);
+  const patches = (path) => stub.requests.filter((r) => r.method === "PATCH" && r.path === path);
   const bodyOf = (r) => JSON.parse(r.body.toString());
 
   const calls = [
@@ -134,10 +141,11 @@ describe("pipeline builder tools", () => {
     ["adsoptimiser_get_pipeline", { graph_id: "pg_1" }],
     ["adsoptimiser_validate_pipeline", { graph: GRAPH }],
     ["adsoptimiser_save_pipeline", { name: "Sneaker spin", graph: GRAPH }],
+    ["adsoptimiser_save_pipeline", { name: "Sneaker spin", graph: GRAPH, graph_id: "pg_1" }],
     ["adsoptimiser_run_pipeline", { graph: GRAPH }],
   ];
   for (const [name, args] of calls) {
-    it(`${name} calls only its documented routes, with the bearer token`, async () => {
+    it(`${name}${name.endsWith("save_pipeline") && args.graph_id ? " (update)" : ""} calls only its documented routes, with the bearer token`, async () => {
       const res = await ctx.call(name, args);
       assert.equal(res.isError, false, res.text);
       assert.ok(stub.requests.length > 0);
@@ -211,7 +219,7 @@ describe("pipeline builder tools", () => {
     assert.match(res.text, /not valid \(1 problem\)/);
   });
 
-  it("save_pipeline posts name, description, graph and graph_id, and links to the editor", async () => {
+  it("save_pipeline PATCHes an update by graph_id and POSTs a new pipeline, and links to the editor", async () => {
     const res = await ctx.call("adsoptimiser_save_pipeline", {
       name: "Sneaker spin",
       description: "Text to image to video",
@@ -219,11 +227,11 @@ describe("pipeline builder tools", () => {
       graph_id: "pg_1",
     });
     assert.equal(res.isError, false, res.text);
-    assert.deepEqual(bodyOf(posts("/api/v1/pipelines/graphs")[0]), {
+    assert.equal(posts("/api/v1/pipelines/graphs").length, 0);
+    assert.deepEqual(bodyOf(patches("/api/v1/pipelines/graphs/pg_1")[0]), {
       name: "Sneaker spin",
       description: "Text to image to video",
       graph: GRAPH,
-      graph_id: "pg_1",
     });
     assert.equal(res.structured.graph_id, "pg_1");
     assert.equal(res.structured.editor_url, "https://app.example.test/#/pipeline-editor");
@@ -231,8 +239,30 @@ describe("pipeline builder tools", () => {
 
     const created = await ctx.call("adsoptimiser_save_pipeline", { name: "New", graph: GRAPH });
     assert.equal(created.structured.graph_id, "pg_new");
-    assert.equal(bodyOf(posts("/api/v1/pipelines/graphs")[1]).graph_id, undefined);
+    assert.deepEqual(bodyOf(posts("/api/v1/pipelines/graphs")[0]), { name: "New", graph: GRAPH });
+    assert.equal(patches("/api/v1/pipelines/graphs/pg_1").length, 1);
     assert.match(created.text, /Saved pipeline "New" as pg_new/);
+  });
+
+  it("save_pipeline surfaces the API's graph errors on update too", async () => {
+    const res = await ctx.call("adsoptimiser_save_pipeline", {
+      name: "Bad",
+      graph_id: "pg_1",
+      graph: { nodes: [{ id: "y", type: "levitate" }] },
+    });
+    assert.equal(res.isError, true);
+    assert.match(res.text, /Unknown node type "levitate" on node "y"/);
+  });
+
+  it("validate_pipeline prefers node_count and needs_run_prompt from the API when sent", async () => {
+    stub.setHandler((r) =>
+      r.path === "/api/v1/pipelines/graphs/validate"
+        ? { json: { ok: true, errors: [], estimated_cost_usd: 0.1, node_count: 7, needs_run_prompt: true } }
+        : undefined
+    );
+    const res = await ctx.call("adsoptimiser_validate_pipeline", { graph: GRAPH });
+    assert.equal(res.structured.node_count, 7);
+    assert.equal(res.structured.needs_run_prompt, true);
   });
 
   it("save_pipeline surfaces the API's graph errors", async () => {
@@ -387,9 +417,10 @@ describe("pipeline builder tools", () => {
       ["adsoptimiser_get_pipeline", { graph_id: "pg_1" }],
       ["adsoptimiser_validate_pipeline", { graph: GRAPH }],
       ["adsoptimiser_save_pipeline", { name: "n", graph: GRAPH }],
+      ["adsoptimiser_save_pipeline", { name: "n", graph: GRAPH, graph_id: "pg_1" }],
       ["adsoptimiser_run_pipeline", { graph: GRAPH }],
     ]) {
-      it(`${name} says pipeline building is not supported yet`, async () => {
+      it(`${name}${name.endsWith("save_pipeline") && args.graph_id ? " (update)" : ""} says pipeline building is not supported yet`, async () => {
         stub.setHandler(() => denied);
         const res = await ctx.call(name, args);
         assert.equal(res.isError, true);

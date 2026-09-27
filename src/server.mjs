@@ -89,7 +89,11 @@ export const TOOL_ROUTES = {
     "POST /api/v1/jobs/source-media",
     "POST /api/v1/pipelines/graphs/validate",
   ],
-  adsoptimiser_save_pipeline: ["POST /api/v1/jobs/source-media", "POST /api/v1/pipelines/graphs"],
+  adsoptimiser_save_pipeline: [
+    "POST /api/v1/jobs/source-media",
+    "POST /api/v1/pipelines/graphs",
+    "PATCH /api/v1/pipelines/graphs/:graph_id",
+  ],
   adsoptimiser_upload_file: ["POST /api/v1/jobs/source-media"],
   adsoptimiser_download_job: ["GET /api/v1/jobs/:id", "GET /media/:key"],
   adsoptimiser_batch_generate: ["POST /api/v1/jobs/source-media", "POST /api/v1/jobs"],
@@ -578,7 +582,12 @@ export function createServer(options = {}) {
       valid,
       errors: shapeErrors(result.errors),
       estimated_cost_usd: typeof result.estimated_cost_usd === "number" ? result.estimated_cost_usd : null,
-      node_count: Array.isArray(graph.nodes) ? graph.nodes.length : 0,
+      // Prefer the API's own figures when it sends them; count locally otherwise.
+      node_count: Number.isInteger(result.node_count)
+        ? result.node_count
+        : Array.isArray(graph.nodes)
+          ? graph.nodes.length
+          : 0,
       needs_run_prompt: needsRunPrompt(result, graph),
     };
   }
@@ -1171,8 +1180,10 @@ export function createServer(options = {}) {
       const { graph, uploads } = await resolveGraphFiles(rawGraph);
       const body = { name, graph };
       if (description !== undefined) body.description = description;
-      if (graph_id) body.graph_id = graph_id;
-      const saved = await api.request("POST", "/api/v1/pipelines/graphs", { json: body });
+      // Updates use the existing PATCH route; new pipelines are POSTed.
+      const saved = graph_id
+        ? await api.request("PATCH", `/api/v1/pipelines/graphs/${encodeURIComponent(graph_id)}`, { json: body })
+        : await api.request("POST", "/api/v1/pipelines/graphs", { json: body });
       const structured = {
         graph_id: saved.graph_id ?? graph_id ?? null,
         name: saved.name ?? name,

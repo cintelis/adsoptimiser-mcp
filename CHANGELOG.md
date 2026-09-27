@@ -14,7 +14,7 @@ All notable changes to `@cintelisai/adsoptimiser-mcp` are recorded here. Version
   - `adsoptimiser_get_pipeline_nodes`: the node catalogue (inputs, outputs, params with allowed values and ranges, rules), the graph rules and a worked example.
   - `adsoptimiser_get_pipeline`: a saved pipeline's graph, node count and estimated cost per run.
   - `adsoptimiser_validate_pipeline`: errors by node id, node count, estimated cost per run and whether a run prompt is needed. Uses no allowance.
-  - `adsoptimiser_save_pipeline`: save a new pipeline or update one by `graph_id`, with a link to the pipeline editor.
+  - `adsoptimiser_save_pipeline`: save a new pipeline (`POST /pipelines/graphs`) or update one by `graph_id` (`PATCH /pipelines/graphs/:graph_id`), with a link to the pipeline editor.
 - `adsoptimiser_run_pipeline` accepts an inline `graph` as well as `template_id` or `graph_id` (exactly one). Inline graphs are validated first and not run if invalid, and the reply gives the step count and estimated cost.
 - Local image paths in `input_image` nodes (`image_url` or `image_path`) are checked, uploaded and replaced with their hosted URL before a graph is validated, saved or run. Each file is uploaded once per session.
 - A clear message when the Ads Optimiser deployment does not yet allow pipeline building with API tokens.
