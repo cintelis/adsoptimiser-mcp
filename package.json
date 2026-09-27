@@ -1,0 +1,51 @@
+{
+  "name": "@cintelisai/adsoptimiser-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for Ads Optimiser: generate TikTok ad images and videos from Claude, with local file upload and download. Device-flow sign-in, no API keys.",
+  "type": "module",
+  "main": "server.mjs",
+  "bin": {
+    "adsoptimiser-mcp": "server.mjs"
+  },
+  "files": [
+    "server.mjs",
+    "src/"
+  ],
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18.17"
+  },
+  "license": "MIT",
+  "author": "Cintelis Pty Limited",
+  "homepage": "https://adsoptimiser.com.au",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cintelis/adsoptimiser-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/cintelis/adsoptimiser-mcp/issues"
+  },
+  "keywords": [
+    "mcp",
+    "modelcontextprotocol",
+    "claude",
+    "ads-optimiser",
+    "tiktok",
+    "tiktok-ads",
+    "ad-creative",
+    "grok",
+    "image-generation",
+    "video-generation",
+    "device-flow"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.1",
+    "zod": "^4.0.0"
+  }
+}

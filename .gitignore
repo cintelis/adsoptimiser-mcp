@@ -1,0 +1,4 @@
+node_modules/
+*.tgz
+adsoptimiser-output/
+.DS_Store

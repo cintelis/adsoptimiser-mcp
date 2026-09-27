@@ -1,0 +1,61 @@
+name: Publish to npm
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # npm provenance
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Tag must match package.json version
+        id: version
+        run: |
+          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
+            echo "::error::Run this workflow on a version tag (vX.Y.Z), not a branch."
+            exit 1
+          fi
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          if [ "${TAG_VERSION}" != "${PKG_VERSION}" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match package.json version ${PKG_VERSION}."
+            exit 1
+          fi
+          echo "version=${PKG_VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Skip if this version is already on npm
+        id: exists
+        run: |
+          NAME="$(node -p "require('./package.json').name")"
+          if npm view "${NAME}@${{ steps.version.outputs.version }}" version >/dev/null 2>&1; then
+            echo "already=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::${NAME}@${{ steps.version.outputs.version }} is already published; skipping."
+          else
+            echo "already=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - run: npm ci
+        if: steps.exists.outputs.already == 'false'
+      - run: npm test
+        if: steps.exists.outputs.already == 'false'
+      - run: npm pack --dry-run
+        if: steps.exists.outputs.already == 'false'
+      - run: npm publish --provenance --access public
+        if: steps.exists.outputs.already == 'false'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
