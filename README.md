@@ -82,6 +82,7 @@ In any chat: *"connect to Ads Optimiser"*. Claude will call `adsoptimiser_connec
 | `adsoptimiser_enhance_prompt` | Expand a rough idea into a detailed ad prompt (uses no allowance) |
 | `adsoptimiser_generate_image` | Generate an image; accepts local reference images (`reference_image_paths`), URLs, earlier jobs or a saved `character_id` |
 | `adsoptimiser_generate_video` | Start a video; text-to-video, or image-to-video from a local image (`source_image_path`), URL or earlier job; `character_id` and `script` for talking clips |
+| `adsoptimiser_lip_sync` | Make the person in a finished clip (a job, a URL or a local `video_path`) say a new line in a designed voice, lip-synced by Kling |
 | `adsoptimiser_get_job` | Status and result URL of one job |
 | `adsoptimiser_list_jobs` | Recent jobs, filterable by status and type |
 | `adsoptimiser_list_pipelines` | Pipeline templates and saved pipelines |
@@ -120,12 +121,19 @@ A character is a saved person (an AI influencer, a brand ambassador) that keeps 
 3. **Preview the voice.** `adsoptimiser_list_voices` lists the xAI presets and the OpenAI voices; `adsoptimiser_preview_voice` plays a short sample, and with `save_to` saves the mp3 so you can listen locally. OpenAI voices take instructions such as accent, pacing and tone.
 4. **Make content.** Pass `character_id` to `adsoptimiser_generate_image` for new scenes (porch, kitchen, garden), to `adsoptimiser_generate_video` with a `script` for a 9:16 talking-to-camera clip, or to a pipeline. For captioned b-roll, animate a scene image and add an `add_captions` step in a pipeline.
 
-Talking videos speak xAI preset voices until lip-sync lands: a character with an OpenAI voice uses its `xai_voice_id` (else eve) in talking clips, and the job's `Voice:` note says so. OpenAI voices narrate: an `add_voiceover` step speaks over a finished video in the character's voice. Characters are edited with `adsoptimiser_update_character` and deleted only in the app. Saving characters and previewing voices use no allowance.
+Talking clips in a designed voice now work through lip-sync. There are two ways:
+
+- **One go:** run the "Character talking clip (designed voice)" template (`character-lip-sync`) with `adsoptimiser_run_pipeline`, a `character_id`, and the exact line as the prompt (about 20 words). It places the character in a fitting scene, animates an 8 second 720p clip, lip-syncs your line in the character's own voice (OpenAI or xAI) and adds captions. That is about US$0.72 per run in provider costs.
+- **Step by step:** make a 2 to 10 second clip at 720p or 1080p (not 480p) with `adsoptimiser_generate_video`, then call `adsoptimiser_lip_sync` with its job id (or a URL, or a local .mp4 or .mov up to 100 MB as `video_path`) and the `script`. The line must fit the clip: speech runs about 15 characters a second, so about 20 words for an 8 second clip. The voice is `voice`, else the character's voice, else eve.
+
+Each lip-sync uses one video generation from the plan allowance and counts toward the daily video quota. It takes 2 to 5 minutes; follow it with `adsoptimiser_get_job`.
+
+`adsoptimiser_generate_video` with a `script` still speaks only xAI preset voices: a character with an OpenAI voice uses its `xai_voice_id` (else eve) there, and the job's `Voice:` note says so. OpenAI voices also narrate: an `add_voiceover` step speaks over a finished video in the character's voice. Characters are edited with `adsoptimiser_update_character` and deleted only in the app. Saving characters and previewing voices use no allowance.
 
 ### Working with local files
 
 - **Use absolute paths.** Claude Desktop starts servers in its own folder, so relative paths may not point where you expect. Paths starting with `~` expand to your home folder.
-- **Uploads:** images must be PNG, JPEG, WebP or GIF, up to 10 MB (HEIC and TIFF need converting to JPEG or PNG first). Videos must be MP4 or MOV, up to 120 MB. Files are checked on your machine before anything is sent.
+- **Uploads:** images must be PNG, JPEG, WebP or GIF, up to 10 MB (HEIC and TIFF need converting to JPEG or PNG first). Videos must be MP4 or MOV, up to 120 MB (100 MB for a lip-sync `video_path`). Files are checked on your machine before anything is sent.
 - **Downloads** go to `./adsoptimiser-output` by default (or your home folder's `adsoptimiser-output` when the server was started in a system folder). Files are named `<job id>-<prompt words>.<ext>`. An existing file is never replaced unless you ask for `overwrite`; a numbered name such as `-2` is used instead. Folder paths containing `..` are refused.
 - **Batches** stop at the first plan limit, daily quota or rate limit and report which jobs were queued and the `offset` to resume from once you are ready. The API allows about 8 generation requests a minute per person, so a full batch of 10 may need a second call.
 

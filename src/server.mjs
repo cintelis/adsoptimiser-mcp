@@ -37,6 +37,7 @@ import {
   EXAMPLE_DESCRIPTION,
   EXAMPLE_GRAPH,
   GRAPH_RULES,
+  LIP_SYNC_MODELS,
   MAX_GRAPH_NODES,
   OPENAI_VOICES,
   compactNodeType,
@@ -59,6 +60,11 @@ export const CLIENT_NAME = "Claude (MCP)";
 export const MAX_REFERENCE_IMAGES = 5;
 export const MAX_BATCH_ITEMS = 10;
 export const MAX_CHARACTER_IMAGES = 5;
+/** Kling LipSync refuses source clips over 100 MB (the upload route allows 120). */
+export const MAX_LIP_SYNC_VIDEO_BYTES = 100 * 1024 * 1024;
+export const MAX_LIP_SYNC_SCRIPT_CHARS = 900;
+/** Friendly names for models whose ids read poorly in a job summary. */
+export const MODEL_LABELS = { "kling-lipsync": "Kling LipSync" };
 const DEFAULT_IMAGE_MODEL = "grok-imagine-image-2.0";
 const DEFAULT_VIDEO_MODEL = "grok-imagine-video";
 
@@ -76,6 +82,11 @@ export const TOOL_ROUTES = {
     "GET /api/v1/jobs/:id",
   ],
   adsoptimiser_generate_video: ["POST /api/v1/jobs/source-media", "POST /api/v1/jobs"],
+  adsoptimiser_lip_sync: [
+    "POST /api/v1/jobs/source-media",
+    "GET /api/v1/jobs/:id",
+    "POST /api/v1/jobs/lip-sync",
+  ],
   adsoptimiser_get_job: ["GET /api/v1/jobs/:id"],
   adsoptimiser_list_jobs: ["GET /api/v1/jobs"],
   adsoptimiser_list_pipelines: ["GET /api/v1/pipelines/templates", "GET /api/v1/pipelines/graphs"],
@@ -115,7 +126,7 @@ const INSTRUCTIONS = [
   "If a tool says it is not connected, call adsoptimiser_connect and give the user the URL and code; after they approve in the browser, call adsoptimiser_finish_connect.",
   "Every generation uses the workspace's monthly plan allowance, so confirm before generating many at once.",
   "Local files: pass absolute paths. Use adsoptimiser_download_job to save finished media to disk.",
-  "For a consistent AI person (influencer, brand ambassador): generate a character sheet, save the best shots with adsoptimiser_create_character (local files via image_paths), then pass character_id to adsoptimiser_generate_image, adsoptimiser_generate_video or adsoptimiser_run_pipeline. Audition voices with adsoptimiser_preview_voice.",
+  "For a consistent AI person (influencer, brand ambassador): generate a character sheet, save the best shots with adsoptimiser_create_character (local files via image_paths), then pass character_id to adsoptimiser_generate_image, adsoptimiser_generate_video or adsoptimiser_run_pipeline. Audition voices with adsoptimiser_preview_voice. For a talking clip in a designed (OpenAI) voice, lip-sync a finished clip with adsoptimiser_lip_sync, or run the character-lip-sync template.",
   `To build a pipeline: call adsoptimiser_get_pipeline_nodes first, use only the node types it lists, keep to ${MAX_GRAPH_NODES} nodes, and check the graph with adsoptimiser_validate_pipeline before saving or running it.`,
 ].join(" ");
 
@@ -358,6 +369,39 @@ export const schemas = {
         "The exact line spoken to camera (talking video, Grok Video 1.5, text-to-video, max 720p). The voice is voice_ids, else the character's default voice, else eve."
       ),
   }),
+  lip_sync: z.object({
+    video_job_id: jobId
+      .optional()
+      .describe(
+        "A finished video job to lip-sync (from adsoptimiser_generate_video; 2-10s at 720p or 1080p for Kling)."
+      ),
+    video_url: httpsUrl.optional().describe("Or an https URL of an .mp4/.mov clip."),
+    video_path: localPath
+      .optional()
+      .describe(
+        "Or a local .mp4/.mov clip (absolute path, max 100 MB), uploaded for you. Pass exactly one of video_job_id, video_url or video_path."
+      ),
+    script: z
+      .string()
+      .trim()
+      .min(1)
+      .max(MAX_LIP_SYNC_SCRIPT_CHARS)
+      .describe(
+        "The exact words the person says. It must fit the clip: about 15 characters a second (an 8s clip fits about 120 characters, about 20 words)."
+      ),
+    voice: voiceProfileSchema
+      .optional()
+      .describe(
+        "Voice to speak in (adsoptimiser_list_voices). Omit to use character_id's voice, else the voice of the character the video was made from, else eve."
+      ),
+    character_id: characterId
+      .optional()
+      .describe("Speak in this saved character's voice when voice is omitted."),
+    model: z
+      .enum(LIP_SYNC_MODELS)
+      .optional()
+      .describe("Lip-sync model: kling-lipsync (the default, about US$0.014 per 5 seconds)."),
+  }),
   get_job: z.object({ job_id: jobId }),
   list_jobs: z.object({
     status: z.enum(["queued", "generating", "ready", "failed", "expired"]).optional(),
@@ -387,7 +431,7 @@ export const schemas = {
     character_id: characterId
       .optional()
       .describe(
-        "Fills every character step that has no character chosen. Required for templates marked needs_character (character-talking-clip, character-scene)."
+        "Fills every character step that has no character chosen. Required for templates marked needs_character (character-talking-clip, character-scene, character-lip-sync)."
       ),
   }),
   get_pipeline_run: z.object({ run_id: jobId }),
@@ -612,21 +656,51 @@ export function createServer(options = {}) {
       thumbnail_url: mediaUrl(job.thumbnail_uri),
       app_url: jobLink(job.job_id),
       error: job.error_detail ?? null,
+      ...(job.model && MODEL_LABELS[job.model] ? { model_label: MODEL_LABELS[job.model] } : {}),
       // Set when a talking video could not speak the character's OpenAI voice.
       ...(typeof job.generation_params?.voice_note === "string"
         ? { voice_note: job.generation_params.voice_note }
+        : {}),
+      ...(job.generation_params?.source_mode === "lip_sync"
+        ? { lip_sync: lipSyncDetails(job.generation_params) }
         : {}),
       created_at: job.created_at ?? null,
       updated_at: job.updated_at ?? null,
     };
   }
 
+  /** What a lip-sync job's generation_params say about its source and voice. */
+  function lipSyncDetails(params) {
+    const voice = params.voice;
+    let voiceText = null;
+    if (voice?.provider === "openai" && voice.voice) voiceText = `openai ${voice.voice}`;
+    else if (voice?.provider === "xai" && voice.voice_id) voiceText = `xai ${voice.voice_id}`;
+    else if (typeof params.voice_id === "string") voiceText = `xai ${params.voice_id}`;
+    return {
+      source_job_id: typeof params.source_job_id === "string" ? params.source_job_id : null,
+      voice: voiceText,
+      voice_instructions: voice?.provider === "openai" && voice.instructions ? voice.instructions : null,
+      voice_source: typeof params.voice_source === "string" ? params.voice_source : null,
+      audio_duration_seconds:
+        typeof params.audio_duration_seconds === "number" ? params.audio_duration_seconds : null,
+    };
+  }
+
   function describeJob(summary) {
-    const lines = [
-      `Job ${summary.job_id}: ${summary.asset_type ?? "asset"} ${summary.status ?? "unknown"} (${summary.model ?? "model unknown"})`,
-    ];
+    const kind = summary.lip_sync ? "lip-sync video" : (summary.asset_type ?? "asset");
+    const model = summary.model_label ?? summary.model ?? "model unknown";
+    const lines = [`Job ${summary.job_id}: ${kind} ${summary.status ?? "unknown"} (${model})`];
     if (summary.media_url) lines.push(`Result: ${summary.media_url}`);
     if (summary.error) lines.push(`Error: ${summary.error}`);
+    if (summary.lip_sync) {
+      const l = summary.lip_sync;
+      const bits = [];
+      if (l.voice) bits.push(`spoken in ${l.voice}${l.voice_source ? ` (voice from ${l.voice_source})` : ""}`);
+      if (l.audio_duration_seconds !== null) bits.push(`${l.audio_duration_seconds.toFixed(1)}s of speech`);
+      if (l.source_job_id) bits.push(`source video job ${l.source_job_id}`);
+      if (bits.length) lines.push(`Lip-sync: ${bits.join(", ")}.`);
+      if (l.voice_instructions) lines.push(`Voice instructions: ${l.voice_instructions}`);
+    }
     if (summary.voice_note) lines.push(`Voice: ${summary.voice_note}`);
     lines.push(`Open in Ads Optimiser: ${summary.app_url}`);
     return lines.join("\n");
@@ -1133,7 +1207,7 @@ export function createServer(options = {}) {
   tool(
     "adsoptimiser_generate_video",
     "Generate a video",
-    "Start an ad video generation (text-to-video, or image-to-video from source_image_path, source_image_url or source_job_id). Uses one video generation from the plan allowance and counts toward the daily video quota. Returns immediately with a job id; videos take one to several minutes, so check progress with adsoptimiser_get_job. For a consistent AI influencer pass character_id: with script (the exact words) and no source image you get a 9:16 talking-to-camera clip in the character's voice (talking videos speak xAI preset voices); for silent b-roll, animate a scene image of the character (source_job_id from adsoptimiser_generate_image with character_id) and add on-screen text with a pipeline's add_captions step.",
+    "Start an ad video generation (text-to-video, or image-to-video from source_image_path, source_image_url or source_job_id). Uses one video generation from the plan allowance and counts toward the daily video quota. Returns immediately with a job id; videos take one to several minutes, so check progress with adsoptimiser_get_job. For a consistent AI influencer pass character_id: with script (the exact words) and no source image you get a 9:16 talking-to-camera clip in the character's voice (talking videos speak xAI preset voices; for a designed OpenAI voice, generate the clip at 720p and follow with adsoptimiser_lip_sync); for silent b-roll, animate a scene image of the character (source_job_id from adsoptimiser_generate_image with character_id) and add on-screen text with a pipeline's add_captions step.",
     schemas.generate_video,
     { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     async (args) => {
@@ -1171,6 +1245,96 @@ export function createServer(options = {}) {
     }
   );
 
+  /**
+   * The lip-sync route's refusals, each with what to do next. Anything else
+   * (plan limit, daily quota, OpenAI voices off, rate limits) keeps the
+   * general message.
+   */
+  function describeLipSyncError(err) {
+    if (!(err instanceof ApiError)) return null;
+    const msg = String(err.message ?? "").replace(/[.\s]+$/, "");
+    if (err.status === 403 && err.code === "token_scope_denied") {
+      return `This deployment doesn't support lip-sync yet (the API refused it: ${msg}). For a talking clip, use adsoptimiser_generate_video with a script (xAI preset voices).`;
+    }
+    if (err.status === 503 && err.code === "lip_sync_not_configured") {
+      return `Lip-sync isn't configured on this Ads Optimiser deployment (${msg}). Nothing was charged. For a talking clip, use adsoptimiser_generate_video with a script (xAI preset voices) instead.`;
+    }
+    if (err.status === 400 && err.code === "invalid_source_video") {
+      return `The source video can't be lip-synced: ${msg}. Kling LipSync needs a finished 2 to 10 second clip at 720p or 1080p (each side 720 to 1920 px, at most 100 MB), so generate it at 720p, not 480p. Nothing was charged.`;
+    }
+    if (err.status === 400 && err.code === "invalid_script") {
+      return `The line doesn't fit the clip: ${msg}. Speech runs about 15 characters a second, so an 8 second clip fits about 20 words. Shorten the script or use a longer clip (up to 10 seconds). Nothing was charged.`;
+    }
+    if (err.status === 400 && err.code === "invalid_audio") {
+      return `The speech can't be used for lip-sync: ${msg}. It must run 2 to 60 seconds and be no longer than the clip. Nothing was charged.`;
+    }
+    if (err.status === 502 && err.code === "tts_failed") {
+      return `The line could not be spoken (${msg}). Nothing was charged; try again shortly, or try another voice (adsoptimiser_list_voices).`;
+    }
+    if (err.status === 404) {
+      return `Not found: ${msg}. Check video_job_id (adsoptimiser_list_jobs) and character_id (adsoptimiser_list_characters).`;
+    }
+    if (err.status === 409) {
+      return `The source video isn't ready yet (${msg}). Wait until adsoptimiser_get_job shows it ready, then try again.`;
+    }
+    return null;
+  }
+
+  tool(
+    "adsoptimiser_lip_sync",
+    "Lip-sync a video to a line",
+    "Make the person in an existing video say a new line in a designed voice: the script is spoken (OpenAI voice with instructions, or an xAI preset; by default the character's own voice) and the mouth is re-animated to match (Kling LipSync on fal.ai). The source is a finished video job, an https URL or a local .mp4/.mov file (video_path, max 100 MB, uploaded for you). Kling's limits: the clip must be 2 to 10 seconds at 720p or 1080p (generate it at 720p, not 480p), and the speech must fit the clip at about 15 characters a second (about 20 words for an 8 second clip). Uses one video generation from the plan allowance and counts toward the daily video quota (about US$0.014 per 5 seconds of clip). Returns a job id at once; it takes 2 to 5 minutes, so follow it with adsoptimiser_get_job. For a whole character talking clip in one go, run the character-lip-sync template with adsoptimiser_run_pipeline.",
+    schemas.lip_sync,
+    { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+    async (args) => {
+      const sources = [args.video_job_id, args.video_url, args.video_path].filter(Boolean);
+      if (sources.length !== 1) {
+        return fail("Pass exactly one of video_job_id, video_url or video_path.");
+      }
+      try {
+        let videoUrl = args.video_url;
+        let upload = null;
+        if (args.video_path) {
+          // Checked on this machine first: nothing is uploaded or charged for a bad file.
+          const file = await inspectLocalMedia(args.video_path, { base: config.cwd, expected: "video" });
+          if (file.size > MAX_LIP_SYNC_VIDEO_BYTES) {
+            throw new LocalFileError(
+              `${file.name} is ${(file.size / 1024 / 1024).toFixed(1)} MB; lip-sync source videos are limited to ${MAX_LIP_SYNC_VIDEO_BYTES / 1024 / 1024} MB.`
+            );
+          }
+          videoUrl = (await uploadLocal(file)).source_url;
+          upload = { path: file.path, video_url: videoUrl };
+        }
+        if (args.video_job_id) {
+          // Fail fast (and free) on an unfinished or non-video source.
+          await resolveJobMedia([args.video_job_id], "video");
+        }
+        const body = {
+          ...(args.video_job_id ? { video_job_id: args.video_job_id } : { video_url: videoUrl }),
+          script: args.script,
+          ...(args.voice ? { voice: args.voice } : {}),
+          ...(args.character_id ? { character_id: args.character_id } : {}),
+          ...(args.model ? { model: args.model } : {}),
+        };
+        const job = await api.request("POST", "/api/v1/jobs/lip-sync", { json: body });
+        const summary = {
+          ...summarizeJob(job),
+          estimated_cost_usd: typeof job.estimated_cost_usd === "number" ? job.estimated_cost_usd : null,
+          ...(upload ? { upload } : {}),
+        };
+        if (job.status === "failed") return fail(describeJob(summary), summary);
+        return ok(
+          `${describeJob(summary)}${upload ? `\nUploaded ${upload.path} as the source video.` : ""}\nLip-sync started (estimated provider cost ${usd(summary.estimated_cost_usd)}; uses one video generation from the plan allowance). It usually takes 2 to 5 minutes; call adsoptimiser_get_job with this job id to check.`,
+          summary
+        );
+      } catch (err) {
+        const message = describeLipSyncError(err);
+        if (!message) throw err;
+        return fail(message, { status: err.status, code: err.code, message: err.message });
+      }
+    }
+  );
+
   tool(
     "adsoptimiser_get_job",
     "Get a creative job",
@@ -1198,7 +1362,7 @@ export function createServer(options = {}) {
       const jobs = (result.jobs ?? []).map(summarizeJob);
       const lines = jobs.map(
         (j) =>
-          `- ${j.job_id} ${j.asset_type} ${j.status}${j.media_url ? ` ${j.media_url}` : ""} "${String(j.prompt ?? "").slice(0, 80)}"`
+          `- ${j.job_id} ${j.lip_sync ? "lip-sync video" : j.asset_type} ${j.status}${j.media_url ? ` ${j.media_url}` : ""} "${String(j.prompt ?? "").slice(0, 80)}"`
       );
       const total = result.total ?? jobs.length;
       return ok(`${total} job(s) in total; showing ${jobs.length}.\n${lines.join("\n")}`, {
