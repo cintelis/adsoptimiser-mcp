@@ -209,6 +209,9 @@ export function describeError(err, config) {
   }
   const billingUrl = `${config.appUrl}/#/billing`;
 
+  if (err.code === "openai_voices_not_configured") {
+    return `OpenAI voices are not available on this Ads Optimiser deployment (${err.message}). Use an xAI preset voice instead, for example { "provider": "xai", "voice_id": "eve" } (see adsoptimiser_list_voices).`;
+  }
   if (err.code === "not_connected") {
     return `${err.message} Call adsoptimiser_connect to sign in.`;
   }
@@ -252,14 +255,22 @@ export function describeError(err, config) {
   if (err.status === 404) return `Not found: ${err.message}`;
   if (err.status === 413) return `Too large: ${err.message}`;
   if ([400, 409, 415, 422].includes(err.status)) {
-    return `The request was rejected: ${err.message}`;
+    const errors = validationErrors(err);
+    const list = errors.map((e) => `\n- ${e}`).join("");
+    return `The request was rejected: ${err.message}${list}`;
   }
   return `Ads Optimiser returned an error (HTTP ${err.status}): ${err.message}. Try again shortly.`;
+}
+
+/** The string errors a 400/422 answer lists (for example voice or character validation). */
+function validationErrors(err) {
+  return Array.isArray(err.body?.errors) ? err.body.errors.filter((e) => typeof e === "string") : [];
 }
 
 export function toToolError(err, config) {
   const structured =
     err instanceof ApiError ? { status: err.status, code: err.code, message: err.message } : undefined;
+  if (structured && validationErrors(err).length) structured.errors = validationErrors(err);
   if (err instanceof ApiError && err.code === "plan_limit_exceeded") {
     structured.upgrade_url = `${config.appUrl}/#/billing`;
   }

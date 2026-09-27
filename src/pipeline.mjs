@@ -12,9 +12,10 @@
 export const MAX_GRAPH_NODES = 12;
 
 /**
- * Parameter ranges and meanings per node type. The API's catalogue carries the
- * enums; the numeric ranges and free-text params live in the worker's
- * validator (pipeline-graph.ts validateNodeParams), so they are restated here.
+ * Parameter ranges and meanings per node type, mirroring the worker's
+ * NODE_CATALOG params. Current deployments publish these themselves in
+ * GET /pipelines/nodes (an array per node, which wins); older ones publish
+ * only the enums, and then these fill in the ranges and free-text params.
  */
 const DURATION = { type: "integer", min: 1, max: 15, description: "Seconds, 1 to 15." };
 const SCRIPT = {
@@ -22,6 +23,42 @@ const SCRIPT = {
   max_length: 5000,
   description: "The exact line to be spoken.",
 };
+/** The add_voiceover voice profile, as the API's catalogue describes it. */
+const XAI_PRESET_VOICES = ["eve", "leo", "rex", "ara", "gork", "aurora"];
+export const OPENAI_VOICES = [
+  "alloy",
+  "ash",
+  "ballad",
+  "coral",
+  "echo",
+  "fable",
+  "nova",
+  "onyx",
+  "sage",
+  "shimmer",
+  "verse",
+  "marin",
+  "cedar",
+];
+const VOICE_PARAM = {
+  type: "object",
+  one_of: [
+    { provider: { const: "xai" }, voice_id: { enum: XAI_PRESET_VOICES } },
+    {
+      provider: { const: "openai" },
+      voice: { enum: OPENAI_VOICES },
+      instructions: {
+        type: "string",
+        maxLength: 1000,
+        optional: true,
+        description: "Accent, emotion, intonation, pacing, tone (gpt-4o-mini-tts).",
+      },
+    },
+  ],
+  description:
+    "Narrator voice profile (see adsoptimiser_list_voices). Wins over voice_id and over the character's voice. Omit both to use the voice of the character the video was made from, else eve. OpenAI voices need the deployment's OpenAI key and a script of at most 4096 characters.",
+};
+
 export const PARAM_SPECS = {
   refine_prompt: {
     instruction: {
@@ -59,8 +96,17 @@ export const PARAM_SPECS = {
     },
   },
   add_voiceover: {
-    script: { ...SCRIPT, required: true },
-    voice_id: { type: "string" },
+    script: {
+      ...SCRIPT,
+      required: true,
+      description: "The exact words spoken over the video. OpenAI voices take at most 4096 characters.",
+    },
+    voice: VOICE_PARAM,
+    voice_id: {
+      type: "string",
+      description:
+        "xAI preset narrator voice (shorthand for voice: { provider: xai }). Omitted: the character's voice, else eve.",
+    },
     audio_mode: { type: "string", description: "replace swaps the original audio; mix ducks it under the narration." },
     music_volume: {
       type: "number",
@@ -83,7 +129,7 @@ export const PARAM_SPECS = {
       type: "string",
       required: true,
       description:
-        "An https URL of an existing image (for example a media_url from an earlier job or adsoptimiser_upload_file). With this local server, an absolute local file path also works: it is uploaded for you and replaced with its hosted URL.",
+        "An https URL of an existing image (for example a media_url from an earlier job or adsoptimiser_upload_file).",
     },
   },
   voiced_video: {
@@ -97,6 +143,37 @@ export const PARAM_SPECS = {
     },
     duration: DURATION,
   },
+  character: {
+    character_id: {
+      type: "string",
+      required: true,
+      description:
+        "A saved character id (adsoptimiser_list_characters). Template runs may leave it empty and pass character_id to adsoptimiser_run_pipeline.",
+    },
+  },
+  add_captions: {
+    captions: {
+      type: "string",
+      max_length: 2000,
+      description: "The words to show. Omit to use a wired text node or the video's script.",
+    },
+    position: {
+      type: "string",
+      default: "bottom",
+      description: "bottom sits in the lower third above TikTok's own caption area.",
+    },
+  },
+};
+
+/**
+ * What this local server adds to a param's meaning: appended to the API's
+ * description (or the fallback one above) so it survives catalogue changes.
+ */
+const LOCAL_PARAM_NOTES = {
+  input_image: {
+    image_url:
+      "With this local server, an absolute local file path also works: it is uploaded for you and replaced with its hosted URL.",
+  },
 };
 
 export const GRAPH_RULES = [
@@ -107,7 +184,11 @@ export const GRAPH_RULES = [
   "Each input takes at most its max_connections edges (1 unless stated). One output may feed many inputs (fan-out).",
   "Required inputs other than prompt must be connected.",
   "A prompt input with nothing wired into it uses the run prompt given to adsoptimiser_run_pipeline. When every prompt input is fed by a text or refine_prompt node (or a voice node has a script), no run prompt is needed. Wire one text node to several prompt inputs to share a prompt, or use separate text nodes to give branches different prompts.",
-  "Each generate_image, generate_video, image_to_video, extend_video and voiced_video node is one generation from the plan allowance (video nodes also count toward the daily video quota); add_voiceover and strip_audio are post-processing jobs; text, input_image and refine_prompt are free.",
+  "Each generate_image, generate_video, image_to_video, extend_video and voiced_video node is one generation from the plan allowance (video nodes also count toward the daily video quota); add_voiceover, strip_audio and add_captions are post-processing creative jobs, never generations; text, input_image, character and refine_prompt are free.",
+  "A character node (character_id from adsoptimiser_list_characters) feeds a generate_image or voiced_video refs input as ONE connection and fills the free reference slots with its images; it cannot feed image_to_video's image input. Its description is added to that node's prompt and voiced_video uses its default voice when voice_id is omitted.",
+  "add_captions burns text into a video: its captions param, else a text node wired into its text input, else the script of the voiced_video (or add_voiceover) it captions.",
+  'add_voiceover voice: its voice param ({"provider":"xai","voice_id"} or {"provider":"openai","voice","instructions"?}, see adsoptimiser_list_voices) or voice_id wins, else the voice of the character the video was made from (a character wired upstream of that video), else eve. OpenAI narration needs a script of at most 4096 characters.',
+  "voiced_video (and adsoptimiser_generate_video with a script) only speaks xAI presets: an OpenAI character voice falls back to the character's xai_voice_id, else eve, and the job says so. For an OpenAI voice on a talking clip, strip_audio then add_voiceover.",
   "input_image needs params.image_url: an https URL, or with this local server an absolute local file path, which is uploaded for you.",
   "position is optional editor layout; leave it out.",
 ];
@@ -138,13 +219,45 @@ export const EXAMPLE_GRAPH = {
 export const EXAMPLE_DESCRIPTION =
   "Refines the run prompt, generates a 9:16 product image from it, then animates that image into a 6 second video. Two generations; needs a run prompt.";
 
+/**
+ * The API's params for a node as { name: spec }. Current deployments send an
+ * array of { name, type, required, enum, min, max, maxLength, default, oneOf,
+ * description }; an object map is taken as is. null when there are none.
+ */
+function apiParams(params) {
+  if (Array.isArray(params)) {
+    const out = {};
+    for (const p of params) {
+      if (!p || typeof p.name !== "string") continue;
+      const { name, maxLength, oneOf, enum: values, ...rest } = p;
+      out[name] = {
+        ...rest,
+        ...(values ? { enum: values } : {}),
+        ...(maxLength !== undefined ? { max_length: maxLength } : {}),
+        ...(oneOf ? { one_of: oneOf } : {}),
+      };
+    }
+    return out;
+  }
+  return params && typeof params === "object" ? params : null;
+}
+
 /** One node type from GET /pipelines/nodes, reduced to what a graph author needs. */
 export function compactNodeType(def) {
   const enums = def.enums ?? {};
-  const specs = def.params ?? PARAM_SPECS[def.type] ?? {};
+  const local = PARAM_SPECS[def.type] ?? {};
+  const notes = LOCAL_PARAM_NOTES[def.type] ?? {};
+  // The API decides which params exist; the local specs only fill gaps.
+  const specs = apiParams(def.params) ?? local;
   const params = {};
   for (const [name, spec] of Object.entries(specs)) {
-    params[name] = { ...spec, ...(enums[name] ? { enum: enums[name] } : {}) };
+    const merged = { ...(local[name] ?? {}), ...spec };
+    if (enums[name] && !merged.enum) merged.enum = enums[name];
+    if (merged.required !== true) delete merged.required;
+    if (notes[name]) {
+      merged.description = merged.description ? `${merged.description} ${notes[name]}` : notes[name];
+    }
+    params[name] = merged;
   }
   for (const [name, values] of Object.entries(enums)) {
     if (!params[name]) params[name] = { type: "string", enum: values };
@@ -159,18 +272,40 @@ export function compactNodeType(def) {
       max_connections: p.maxConnections ?? p.max_connections ?? 1,
       ...(p.description ? { description: p.description } : {}),
     })),
-    outputs: (def.outputs ?? []).map((p) => ({ name: p.name, kind: p.kind })),
+    outputs: (def.outputs ?? []).map((p) => ({
+      name: p.name,
+      kind: p.kind,
+      ...(p.description ? { description: p.description } : {}),
+    })),
     params,
     constraints: def.constraints ?? [],
   };
 }
 
+/** {"provider":"xai","voice_id"} | {"provider":"openai","voice","instructions"?} */
+function describeOneOf(variants) {
+  return variants
+    .map(
+      (variant) =>
+        `{${Object.entries(variant ?? {})
+          .map(([key, s]) =>
+            s && s.const !== undefined ? `"${key}":${JSON.stringify(s.const)}` : `"${key}"${s?.optional ? "?" : ""}`
+          )
+          .join(",")}}`
+    )
+    .join(" | ");
+}
+
 function describeParam(name, spec) {
   const bits = [];
   if (spec.required) bits.push("required");
+  if (Array.isArray(spec.one_of)) {
+    bits.push(`object ${describeOneOf(spec.one_of)}${name === "voice" ? ", see adsoptimiser_list_voices" : ""}`);
+  }
   if (spec.enum) bits.push(spec.enum.join("|"));
   if (spec.min !== undefined || spec.max !== undefined) bits.push(`${spec.min ?? ""}..${spec.max ?? ""}`);
   if (spec.max_length) bits.push(`max ${spec.max_length} chars`);
+  if (spec.default !== undefined) bits.push(`default ${spec.default}`);
   return `${name}${bits.length ? ` (${bits.join(", ")})` : ""}`;
 }
 

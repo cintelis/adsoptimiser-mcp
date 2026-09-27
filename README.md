@@ -80,8 +80,8 @@ In any chat: *"connect to Ads Optimiser"*. Claude will call `adsoptimiser_connec
 | `adsoptimiser_disconnect` | Revoke the token on the server and delete it from this machine |
 | `adsoptimiser_list_models` | List image and video models, their options and indicative cost |
 | `adsoptimiser_enhance_prompt` | Expand a rough idea into a detailed ad prompt (uses no allowance) |
-| `adsoptimiser_generate_image` | Generate an image; accepts local reference images (`reference_image_paths`), URLs or earlier jobs |
-| `adsoptimiser_generate_video` | Start a video; text-to-video, or image-to-video from a local image (`source_image_path`), URL or earlier job |
+| `adsoptimiser_generate_image` | Generate an image; accepts local reference images (`reference_image_paths`), URLs, earlier jobs or a saved `character_id` |
+| `adsoptimiser_generate_video` | Start a video; text-to-video, or image-to-video from a local image (`source_image_path`), URL or earlier job; `character_id` and `script` for talking clips |
 | `adsoptimiser_get_job` | Status and result URL of one job |
 | `adsoptimiser_list_jobs` | Recent jobs, filterable by status and type |
 | `adsoptimiser_list_pipelines` | Pipeline templates and saved pipelines |
@@ -89,8 +89,14 @@ In any chat: *"connect to Ads Optimiser"*. Claude will call `adsoptimiser_connec
 | `adsoptimiser_get_pipeline` | A saved pipeline's graph, node count and estimated cost per run |
 | `adsoptimiser_validate_pipeline` | Check a pipeline graph: errors by node, node count, estimated cost, whether it needs a prompt (uses no allowance) |
 | `adsoptimiser_save_pipeline` | Save a pipeline graph to the workspace, or update a saved one by `graph_id`, and link to the pipeline editor |
-| `adsoptimiser_run_pipeline` | Start a pipeline run from a template, a saved pipeline or an inline graph |
+| `adsoptimiser_run_pipeline` | Start a pipeline run from a template, a saved pipeline or an inline graph, optionally with a `character_id` |
 | `adsoptimiser_get_pipeline_run` | Status and results of each pipeline step |
+| `adsoptimiser_list_characters` | Saved characters with their images, description, style and voice |
+| `adsoptimiser_get_character` | One character with every reference image and the job it came from |
+| `adsoptimiser_create_character` | Save a character from 1 to 5 images: local files (`image_paths`), URLs or finished jobs, with an optional voice (uses no allowance) |
+| `adsoptimiser_update_character` | Change a character's name, description, style, voice or images (uses no allowance) |
+| `adsoptimiser_list_voices` | xAI preset voices and OpenAI voices, and whether OpenAI voices are available |
+| `adsoptimiser_preview_voice` | A short sample in any voice as a playable URL, and with `save_to` an mp3 saved locally (uses no allowance) |
 | `adsoptimiser_upload_file` | Upload a local image or video and get its hosted URL (uses no allowance) |
 | `adsoptimiser_download_job` | Save a finished job's image or video to a local folder |
 | `adsoptimiser_batch_generate` | One job per image in a folder (image-to-video or image edit) or per line of a prompts file, up to 10 per call |
@@ -104,6 +110,17 @@ A pipeline is a small graph of steps (up to 12 nodes): for example refine a prom
 Where a graph needs one of your own images (an `input_image` node), give its local path as the node's `image_url` (or `image_path`). The file is checked and uploaded, and the hosted URL is put in its place before the graph is validated, saved or run.
 
 Validating and saving use no allowance. Running does: each generation step uses allowance like a single job. Pipeline building needs an Ads Optimiser deployment that allows it for API tokens; on an older one these tools say so and templates and saved pipelines still run.
+
+### Characters and voices
+
+A character is a saved person (an AI influencer, a brand ambassador) that keeps the same face across images and videos. A typical influencer workflow:
+
+1. **Generate a character sheet.** Ask for the same person from several angles, a full-body shot and a close-up, on a neutral white background with realistic, unretouched skin.
+2. **Save the best shots as a character** with `adsoptimiser_create_character`: finished jobs (`job_ids`), URLs, or your own photos (`image_paths`, checked and uploaded for you), 5 images at most. Add a description (age, face, hair, build, persona) and a voice.
+3. **Preview the voice.** `adsoptimiser_list_voices` lists the xAI presets and the OpenAI voices; `adsoptimiser_preview_voice` plays a short sample, and with `save_to` saves the mp3 so you can listen locally. OpenAI voices take instructions such as accent, pacing and tone.
+4. **Make content.** Pass `character_id` to `adsoptimiser_generate_image` for new scenes (porch, kitchen, garden), to `adsoptimiser_generate_video` with a `script` for a 9:16 talking-to-camera clip, or to a pipeline. For captioned b-roll, animate a scene image and add an `add_captions` step in a pipeline.
+
+Talking videos speak xAI preset voices until lip-sync lands: a character with an OpenAI voice uses its `xai_voice_id` (else eve) in talking clips, and the job's `Voice:` note says so. OpenAI voices narrate: an `add_voiceover` step speaks over a finished video in the character's voice. Characters are edited with `adsoptimiser_update_character` and deleted only in the app. Saving characters and previewing voices use no allowance.
 
 ### Working with local files
 
@@ -142,7 +159,7 @@ Use **this package** when you want Claude to work with local files: upload produ
 ## Security notes
 
 - The token is cached in one file per host in your home folder (`~/.adsoptimiser-mcp-<host>.json`, mode 0600). On Windows the mode is not enforced; the file inherits your user profile's permissions, which by default only you and administrators can read. The token never appears in any config file, log or chat, and tools never return it.
-- The token is **generate-only**: it can generate and view creatives and pipelines in the one workspace you chose, and upload source media. The API refuses it for publishing, scheduling, ads and campaigns, deleting, billing, workspace settings and admin.
+- The token is **generate-only**: it can generate and view creatives, pipelines and characters in the one workspace you chose, save characters, preview voices and upload source media. The API refuses it for publishing, scheduling, ads and campaigns, deleting, billing, workspace settings and admin.
 - Tokens are per machine and individually revocable: each appears in the app under **Profile > API tokens**, where you can revoke it. `adsoptimiser_disconnect` revokes it on the server and deletes the local copy. If a token is revoked elsewhere, the next tool call deletes the local copy and asks you to reconnect; if you lose access to the workspace, the tools tell you to reconnect to another one.
 - Uploaded files are stored by Ads Optimiser under unguessable URLs so the generation models can read them. Do not upload anything you would not put in an ad.
 - Media downloads fetch the public media URL directly; the token is not sent with them.
