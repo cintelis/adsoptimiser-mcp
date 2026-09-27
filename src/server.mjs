@@ -7,7 +7,7 @@
 // billing: the API refuses those routes to tokens (403 token_scope_denied).
 
 import { readFileSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import {
@@ -33,10 +33,26 @@ import {
   resolveOutputFolder,
   saveStream,
 } from "./files.mjs";
+import {
+  EXAMPLE_DESCRIPTION,
+  EXAMPLE_GRAPH,
+  GRAPH_RULES,
+  MAX_GRAPH_NODES,
+  compactNodeType,
+  describeNodeType,
+  localImageRefs,
+  needsRunPrompt,
+  normaliseGraph,
+  shapeErrors,
+} from "./pipeline.mjs";
 
-export const PACKAGE_VERSION = JSON.parse(
-  readFileSync(new URL("../package.json", import.meta.url), "utf8")
-).version;
+/* global __ADSOPTIMISER_VERSION__ */
+// The bundle (dist/server.mjs) has the version baked in at build time; running
+// from source reads it from package.json.
+export const PACKAGE_VERSION =
+  typeof __ADSOPTIMISER_VERSION__ === "string"
+    ? __ADSOPTIMISER_VERSION__
+    : JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 
 export const CLIENT_NAME = "Claude (MCP)";
 export const MAX_REFERENCE_IMAGES = 5;
@@ -61,8 +77,23 @@ export const TOOL_ROUTES = {
   adsoptimiser_get_job: ["GET /api/v1/jobs/:id"],
   adsoptimiser_list_jobs: ["GET /api/v1/jobs"],
   adsoptimiser_list_pipelines: ["GET /api/v1/pipelines/templates", "GET /api/v1/pipelines/graphs"],
-  adsoptimiser_run_pipeline: ["POST /api/v1/pipelines"],
+  adsoptimiser_run_pipeline: [
+    "POST /api/v1/jobs/source-media",
+    "POST /api/v1/pipelines/graphs/validate",
+    "POST /api/v1/pipelines",
+  ],
   adsoptimiser_get_pipeline_run: ["GET /api/v1/pipelines/:run_id"],
+  adsoptimiser_get_pipeline_nodes: ["GET /api/v1/pipelines/nodes"],
+  adsoptimiser_get_pipeline: ["GET /api/v1/pipelines/graphs/:graph_id"],
+  adsoptimiser_validate_pipeline: [
+    "POST /api/v1/jobs/source-media",
+    "POST /api/v1/pipelines/graphs/validate",
+  ],
+  adsoptimiser_save_pipeline: [
+    "POST /api/v1/jobs/source-media",
+    "POST /api/v1/pipelines/graphs",
+    "PATCH /api/v1/pipelines/graphs/:graph_id",
+  ],
   adsoptimiser_upload_file: ["POST /api/v1/jobs/source-media"],
   adsoptimiser_download_job: ["GET /api/v1/jobs/:id", "GET /media/:key"],
   adsoptimiser_batch_generate: ["POST /api/v1/jobs/source-media", "POST /api/v1/jobs"],
@@ -73,6 +104,7 @@ const INSTRUCTIONS = [
   "If a tool says it is not connected, call adsoptimiser_connect and give the user the URL and code; after they approve in the browser, call adsoptimiser_finish_connect.",
   "Every generation uses the workspace's monthly plan allowance, so confirm before generating many at once.",
   "Local files: pass absolute paths. Use adsoptimiser_download_job to save finished media to disk.",
+  `To build a pipeline: call adsoptimiser_get_pipeline_nodes first, use only the node types it lists, keep to ${MAX_GRAPH_NODES} nodes, and check the graph with adsoptimiser_validate_pipeline before saving or running it.`,
 ].join(" ");
 
 // ---------------------------------------------------------------------------
@@ -85,6 +117,48 @@ const httpsUrl = z
   .regex(/^https:\/\/\S+$/i, "Must be an https:// URL");
 const jobId = z.string().regex(/^[A-Za-z0-9_-]{1,128}$/, "Invalid id");
 const localPath = z.string().trim().min(1).max(4096);
+
+const graphNodeId = z.string().max(64).describe("Unique node id: 1 to 40 letters, digits or underscores.");
+const pipelineGraph = z
+  .object({
+    version: z.literal(1).optional().describe("Always 1 (filled in when omitted)."),
+    nodes: z
+      .array(
+        z.object({
+          id: graphNodeId,
+          type: z
+            .string()
+            .max(64)
+            .describe("A node type from adsoptimiser_get_pipeline_nodes. Never invent one."),
+          params: z
+            .record(z.string(), z.unknown())
+            .optional()
+            .describe(
+              "Params for this node type, from adsoptimiser_get_pipeline_nodes. input_image takes image_url: an https URL or an absolute local file path (uploaded for you)."
+            ),
+          position: z
+            .object({ x: z.number(), y: z.number() })
+            .optional()
+            .describe("Editor layout only; optional."),
+        })
+      )
+      .min(1)
+      .max(50)
+      .describe(`The nodes, at most ${MAX_GRAPH_NODES}.`),
+    edges: z
+      .array(
+        z.object({
+          from: z.object({ node: graphNodeId, output: z.string().max(64) }),
+          to: z.object({ node: graphNodeId, input: z.string().max(64) }),
+        })
+      )
+      .max(200)
+      .optional()
+      .describe("Connections from an output of one node to an input of another, of the same kind."),
+  })
+  .describe(
+    "A pipeline graph: { version: 1, nodes: [{ id, type, params }], edges: [{ from: { node, output }, to: { node, input } }] }. See adsoptimiser_get_pipeline_nodes."
+  );
 
 export const schemas = {
   connect: z.object({}),
@@ -187,6 +261,11 @@ export const schemas = {
       .optional()
       .describe("A template id from adsoptimiser_list_pipelines, for example product-ad."),
     graph_id: jobId.optional().describe("A saved pipeline id from adsoptimiser_list_pipelines."),
+    graph: pipelineGraph
+      .optional()
+      .describe(
+        "An unsaved pipeline graph to run as is. Check it with adsoptimiser_validate_pipeline first. Pass exactly one of template_id, graph_id or graph."
+      ),
     prompt: z
       .string()
       .trim()
@@ -195,6 +274,19 @@ export const schemas = {
       .describe("The run prompt. Required unless every step gets its prompt elsewhere."),
   }),
   get_pipeline_run: z.object({ run_id: jobId }),
+  get_pipeline_nodes: z.object({}),
+  get_pipeline: z.object({
+    graph_id: jobId.describe("A saved pipeline id from adsoptimiser_list_pipelines or adsoptimiser_save_pipeline."),
+  }),
+  validate_pipeline: z.object({ graph: pipelineGraph }),
+  save_pipeline: z.object({
+    name: z.string().trim().min(1).max(200).describe("Name shown in the app's pipeline list."),
+    description: z.string().max(2000).optional(),
+    graph: pipelineGraph,
+    graph_id: jobId
+      .optional()
+      .describe("Update this saved pipeline instead of creating a new one."),
+  }),
   upload_file: z.object({
     path: localPath.describe(
       "Absolute path of a local image (png, jpg, webp, gif; max 10 MB) or video (mp4, mov; max 120 MB)."
@@ -410,6 +502,120 @@ export function createServer(options = {}) {
         generation_params: params,
       },
     });
+
+  // -------------------------------------------------------------------------
+  // Pipeline builder helpers
+  // -------------------------------------------------------------------------
+
+  const editorUrl = `${appUrl}/#/pipeline-editor`;
+
+  /**
+   * Builder routes are refused to tokens by deployments that predate them, and
+   * a rejected graph comes back as 400 { errors: [...] }. Both get a message
+   * that says what to do, instead of the generic one.
+   */
+  const builderGuard = (fn, { builderRoute = true } = {}) => async (args) => {
+    try {
+      return await fn(args);
+    } catch (err) {
+      if (builderRoute && err instanceof ApiError && err.status === 403 && err.code === "token_scope_denied") {
+        return fail(
+          `This deployment doesn't support pipeline building yet (the API refused ${err.message ? `it: ${err.message}` : "the request"}). Build the pipeline in the app at ${editorUrl}, or run a template or saved pipeline with adsoptimiser_run_pipeline.`,
+          { status: err.status, code: err.code, message: err.message }
+        );
+      }
+      if (err instanceof ApiError && err.status === 400 && Array.isArray(err.body?.errors)) {
+        const errors = shapeErrors(err.body.errors);
+        return fail(
+          [`The pipeline graph was rejected: ${err.message}`, ...errors.map((e) => `- ${e.message}`)].join("\n"),
+          { valid: false, errors }
+        );
+      }
+      throw err;
+    }
+  };
+
+  // Uploaded local files by path, size and modification time, so validating
+  // and then saving or running the same graph uploads each file once.
+  const uploadedImages = new Map();
+
+  /**
+   * Replace local file paths in input_image nodes with hosted URLs. Every file
+   * is checked before any is uploaded. Returns the rewritten copy of the graph.
+   */
+  async function resolveGraphFiles(rawGraph) {
+    const graph = normaliseGraph(rawGraph);
+    const refs = localImageRefs(graph);
+    for (const ref of refs) {
+      if (ref.conflict) {
+        throw new LocalFileError(
+          `input_image node "${ref.node.id}" has both image_url and image_path; give only one.`
+        );
+      }
+    }
+    const files = [];
+    for (const ref of refs) {
+      const file = await inspectLocalMedia(ref.path, { base: config.cwd, expected: "image" });
+      const { mtimeMs } = await stat(file.path);
+      files.push({ ref, file, key: `${file.path}|${file.size}|${mtimeMs}` });
+    }
+    const uploads = [];
+    for (const { ref, file, key } of files) {
+      let url = uploadedImages.get(key);
+      if (!url) {
+        url = (await uploadLocal(file)).source_url;
+        uploadedImages.set(key, url);
+      }
+      const params = { ...(ref.node.params ?? {}), image_url: url };
+      delete params.image_path;
+      ref.node.params = params;
+      uploads.push({ node_id: ref.node.id, path: file.path, image_url: url });
+    }
+    return { graph, uploads };
+  }
+
+  /** POST /graphs/validate, shaped for the tools. */
+  async function validateGraph(graph) {
+    const result = await api.request("POST", "/api/v1/pipelines/graphs/validate", { json: { graph } });
+    const valid = typeof result.valid === "boolean" ? result.valid : result.ok === true;
+    return {
+      valid,
+      errors: shapeErrors(result.errors),
+      estimated_cost_usd: typeof result.estimated_cost_usd === "number" ? result.estimated_cost_usd : null,
+      // Prefer the API's own figures when it sends them; count locally otherwise.
+      node_count: Number.isInteger(result.node_count)
+        ? result.node_count
+        : Array.isArray(graph.nodes)
+          ? graph.nodes.length
+          : 0,
+      needs_run_prompt: needsRunPrompt(result, graph),
+    };
+  }
+
+  const usd = (value) => (typeof value === "number" ? `US$${value.toFixed(2)}` : "unknown");
+
+  function describeValidation(v) {
+    if (!v.valid) {
+      return [
+        `The graph is not valid (${v.errors.length} problem${v.errors.length === 1 ? "" : "s"}):`,
+        ...v.errors.map((e) => `- ${e.message}`),
+        "Fix these using the node catalogue from adsoptimiser_get_pipeline_nodes, then validate again.",
+      ].join("\n");
+    }
+    return `The graph is valid: ${v.node_count} node${v.node_count === 1 ? "" : "s"}, estimated provider cost about ${usd(v.estimated_cost_usd)} per run. ${
+      v.needs_run_prompt
+        ? "Running it needs a prompt (some prompt input is not wired)."
+        : "Running it needs no prompt (every prompt input is wired)."
+    }`;
+  }
+
+  function describeUploads(uploads) {
+    return uploads.length
+      ? `\nUploaded ${uploads.length} local image${uploads.length === 1 ? "" : "s"} for input_image nodes (${uploads
+          .map((u) => u.node_id)
+          .join(", ")}).`
+      : "";
+  }
 
   // -------------------------------------------------------------------------
   // Connection
@@ -758,7 +964,7 @@ export function createServer(options = {}) {
   tool(
     "adsoptimiser_list_pipelines",
     "List pipelines",
-    "List pipeline templates and the workspace's saved pipelines that adsoptimiser_run_pipeline can start.",
+    "List pipeline templates and the workspace's saved pipelines that adsoptimiser_run_pipeline can start. To design a new pipeline, start with adsoptimiser_get_pipeline_nodes.",
     schemas.list_pipelines,
     { readOnlyHint: true, openWorldHint: false },
     async () => {
@@ -793,28 +999,55 @@ export function createServer(options = {}) {
   tool(
     "adsoptimiser_run_pipeline",
     "Run a pipeline",
-    "Start a pipeline run from a template_id or a saved graph_id. Each generation step uses plan allowance like a single job (video steps also count toward the daily video quota). Returns the run id and an estimated provider cost; check progress with adsoptimiser_get_pipeline_run.",
+    `Start a pipeline run from exactly one of: a template_id or saved graph_id (see adsoptimiser_list_pipelines), or an unsaved graph. An inline graph must use only node types from adsoptimiser_get_pipeline_nodes, keep to ${MAX_GRAPH_NODES} nodes, and should pass adsoptimiser_validate_pipeline first; it is validated again here and not run if invalid. Local image paths in input_image nodes are uploaded for you. Each generation step uses plan allowance like a single job (video steps also count toward the daily video quota), so confirm with the user before running. Returns the run id, step count and estimated provider cost; check progress with adsoptimiser_get_pipeline_run.`,
     schemas.run_pipeline,
     { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     async (args) => {
-      if (!!args.template_id === !!args.graph_id) {
-        return fail("Pass exactly one of template_id or graph_id (see adsoptimiser_list_pipelines).");
+      const sources = [args.template_id, args.graph_id, args.graph].filter((v) => v !== undefined && v !== "");
+      if (sources.length !== 1) {
+        return fail(
+          "Pass exactly one of template_id, graph_id (see adsoptimiser_list_pipelines) or graph (an inline pipeline graph)."
+        );
       }
-      const body = args.graph_id ? { graph_id: args.graph_id } : { template_id: args.template_id };
-      if (args.prompt) body.prompt = args.prompt;
-      const result = await api.request("POST", "/api/v1/pipelines", { json: body });
-      const run = result.run ?? {};
-      const structured = {
-        run_id: run.run_id,
-        status: run.status,
-        steps: (result.stages ?? []).map((s) => s.stage_type),
-        estimated_cost_usd: result.estimated_cost_usd ?? null,
-        app_url: `${appUrl}/#/pipelines`,
+      const start = async () => {
+        let body;
+        let uploads = [];
+        if (args.graph) {
+          const resolved = await resolveGraphFiles(args.graph);
+          uploads = resolved.uploads;
+          const check = await validateGraph(resolved.graph);
+          if (!check.valid) {
+            return fail(`Not run: ${describeValidation(check)}`, check);
+          }
+          if (check.needs_run_prompt && !args.prompt) {
+            return fail(
+              "Not run: this graph needs a prompt, because at least one prompt input has nothing wired into it. Pass prompt, or feed every prompt input from a text or refine_prompt node.",
+              check
+            );
+          }
+          body = { graph: resolved.graph };
+        } else {
+          body = args.graph_id ? { graph_id: args.graph_id } : { template_id: args.template_id };
+        }
+        if (args.prompt) body.prompt = args.prompt;
+        const result = await api.request("POST", "/api/v1/pipelines", { json: body });
+        const run = result.run ?? {};
+        const steps = (result.stages ?? []).map((s) => s.stage_type);
+        const structured = {
+          run_id: run.run_id,
+          status: run.status,
+          step_count: steps.length,
+          steps,
+          estimated_cost_usd: result.estimated_cost_usd ?? null,
+          app_url: `${appUrl}/#/pipelines`,
+          ...(uploads.length ? { uploads } : {}),
+        };
+        return ok(
+          `Pipeline run ${run.run_id} started: ${steps.length} step${steps.length === 1 ? "" : "s"} (${steps.join(" > ")}). Estimated provider cost about ${usd(structured.estimated_cost_usd)}. Each generation step uses one generation from the workspace's plan allowance (video steps also count toward the daily video quota).${describeUploads(uploads)}\nCheck progress with adsoptimiser_get_pipeline_run.`,
+          structured
+        );
       };
-      return ok(
-        `Pipeline run ${run.run_id} started (${structured.steps.join(" > ")}). Estimated provider cost about US$${result.estimated_cost_usd ?? "?"}. Check it with adsoptimiser_get_pipeline_run.`,
-        structured
-      );
+      return builderGuard(start, { builderRoute: Boolean(args.graph) })();
     }
   );
 
@@ -853,6 +1086,117 @@ export function createServer(options = {}) {
       ];
       return ok(lines.join("\n"), structured);
     }
+  );
+
+  // -------------------------------------------------------------------------
+  // Pipeline builder (same tools as the hosted connector)
+  // -------------------------------------------------------------------------
+
+  tool(
+    "adsoptimiser_get_pipeline_nodes",
+    "Pipeline node catalogue",
+    `Get the pipeline node catalogue: every node type with its inputs (kind, required, max connections), outputs, params (allowed values and ranges) and rules, plus the graph rules (at most ${MAX_GRAPH_NODES} nodes, edge format, how the run prompt feeds unwired prompt inputs) and a worked example graph. Always call this before designing or changing a pipeline graph, and use only the node types, ports and params it lists; never invent node types. Uses no allowance.`,
+    schemas.get_pipeline_nodes,
+    { readOnlyHint: true, openWorldHint: false },
+    builderGuard(async () => {
+      const catalogue = await api.request("GET", "/api/v1/pipelines/nodes");
+      const maxNodes = Number(catalogue.max_nodes) || MAX_GRAPH_NODES;
+      const nodeTypes = (catalogue.nodes ?? []).map(compactNodeType);
+      const rules = Array.isArray(catalogue.rules) && catalogue.rules.length ? catalogue.rules : GRAPH_RULES;
+      const example = catalogue.example ?? { description: EXAMPLE_DESCRIPTION, graph: EXAMPLE_GRAPH };
+      const text = [
+        `Pipeline node types (${nodeTypes.length}). Inputs marked * are required; xN is the max connections.`,
+        ...nodeTypes.map(describeNodeType),
+        "",
+        "Graph rules:",
+        ...rules.map((r) => `- ${r}`),
+        "",
+        `Example: ${example.description ?? ""}`,
+        JSON.stringify(example.graph ?? example),
+        "",
+        "Next: build the graph, check it with adsoptimiser_validate_pipeline, then save it with adsoptimiser_save_pipeline or run it with adsoptimiser_run_pipeline.",
+      ].join("\n");
+      return ok(text, { max_nodes: maxNodes, node_types: nodeTypes, rules, example });
+    })
+  );
+
+  tool(
+    "adsoptimiser_get_pipeline",
+    "Get a saved pipeline",
+    "Get a saved pipeline's graph (nodes, edges and params), name and estimated cost per run, for example to change it and save it again with adsoptimiser_save_pipeline and its graph_id.",
+    schemas.get_pipeline,
+    { readOnlyHint: true, openWorldHint: false },
+    builderGuard(async ({ graph_id }) => {
+      const saved = await api.request("GET", `/api/v1/pipelines/graphs/${encodeURIComponent(graph_id)}`);
+      const graph = saved.graph ?? { version: 1, nodes: [], edges: [] };
+      const structured = {
+        graph_id: saved.graph_id ?? graph_id,
+        name: saved.name ?? null,
+        description: saved.description ?? null,
+        node_count: Array.isArray(graph.nodes) ? graph.nodes.length : 0,
+        estimated_cost_usd: saved.estimated_cost_usd ?? null,
+        needs_run_prompt: needsRunPrompt(saved, graph),
+        updated_at: saved.updated_at ?? null,
+        graph,
+        editor_url: editorUrl,
+      };
+      return ok(
+        [
+          `Saved pipeline ${structured.graph_id}: "${structured.name ?? "unnamed"}", ${structured.node_count} node${structured.node_count === 1 ? "" : "s"}, estimated provider cost about ${usd(structured.estimated_cost_usd)} per run.${structured.needs_run_prompt ? " Running it needs a prompt." : ""}`,
+          ...(structured.description ? [`Description: ${structured.description}`] : []),
+          `Graph: ${JSON.stringify(graph)}`,
+          `Edit it in the app: ${editorUrl}`,
+        ].join("\n"),
+        structured
+      );
+    })
+  );
+
+  tool(
+    "adsoptimiser_validate_pipeline",
+    "Validate a pipeline graph",
+    `Check a pipeline graph without running or saving it: reports whether it is valid, each problem with the node ids involved, the node count (at most ${MAX_GRAPH_NODES}), the estimated provider cost per run, and whether running it needs a prompt. Uses no allowance. Always validate before adsoptimiser_save_pipeline or adsoptimiser_run_pipeline with a graph; build graphs only from adsoptimiser_get_pipeline_nodes. Local image paths in input_image nodes are uploaded, and the returned graph has them replaced with hosted URLs: pass that graph on to save or run.`,
+    schemas.validate_pipeline,
+    // Not read-only: local images in the graph are uploaded.
+    { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    builderGuard(async ({ graph: rawGraph }) => {
+      const { graph, uploads } = await resolveGraphFiles(rawGraph);
+      const check = await validateGraph(graph);
+      const structured = { ...check, ...(uploads.length ? { uploads, graph } : {}) };
+      return toolText(describeValidation(check) + describeUploads(uploads), {
+        structured,
+        isError: !check.valid,
+      });
+    })
+  );
+
+  tool(
+    "adsoptimiser_save_pipeline",
+    "Save a pipeline",
+    `Save a pipeline graph to the workspace (or update one when graph_id is given) so it can be run later with adsoptimiser_run_pipeline and edited in the app's pipeline editor. Build it only from node types in adsoptimiser_get_pipeline_nodes, keep to ${MAX_GRAPH_NODES} nodes, and check it with adsoptimiser_validate_pipeline first; an invalid graph is refused with its errors. Local image paths in input_image nodes are uploaded for you. Saving uses no allowance.`,
+    schemas.save_pipeline,
+    { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+    builderGuard(async ({ name, description, graph: rawGraph, graph_id }) => {
+      const { graph, uploads } = await resolveGraphFiles(rawGraph);
+      const body = { name, graph };
+      if (description !== undefined) body.description = description;
+      // Updates use the existing PATCH route; new pipelines are POSTed.
+      const saved = graph_id
+        ? await api.request("PATCH", `/api/v1/pipelines/graphs/${encodeURIComponent(graph_id)}`, { json: body })
+        : await api.request("POST", "/api/v1/pipelines/graphs", { json: body });
+      const structured = {
+        graph_id: saved.graph_id ?? graph_id ?? null,
+        name: saved.name ?? name,
+        node_count: graph.nodes.length,
+        estimated_cost_usd: saved.estimated_cost_usd ?? null,
+        editor_url: editorUrl,
+        ...(uploads.length ? { uploads } : {}),
+      };
+      return ok(
+        `${graph_id ? "Updated" : "Saved"} pipeline "${structured.name}" as ${structured.graph_id} (${structured.node_count} node${structured.node_count === 1 ? "" : "s"}).${describeUploads(uploads)}\nRun it with adsoptimiser_run_pipeline and graph_id ${structured.graph_id}, or open it in the pipeline editor: ${editorUrl}`,
+        structured
+      );
+    })
   );
 
   // -------------------------------------------------------------------------

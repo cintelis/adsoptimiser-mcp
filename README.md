@@ -6,7 +6,7 @@ Connects Claude (Desktop, Code, or any MCP client) to [Ads Optimiser](https://ad
 
 ## Setup
 
-Requires Node.js 18.17 or later.
+Requires Node.js 18.17 or later. The package is a single self-contained file with no dependencies, so `npx` has one small download to make and starts in well under Claude Desktop's start-up limit.
 
 ### Claude Desktop
 
@@ -24,6 +24,34 @@ Add to `claude_desktop_config.json` (Settings > Developer > Edit Config), then r
 ```
 
 On Windows, if `npx` fails to launch, use `"command": "cmd", "args": ["/c", "npx", "-y", "@cintelisai/adsoptimiser-mcp@latest"]`.
+
+#### Troubleshooting on Windows
+
+If Ads Optimiser does not appear in Claude Desktop, or shows as failed:
+
+1. Check the server log at `%LOCALAPPDATA%\Claude\Logs\mcp-server-adsoptimiser.log`. The Microsoft Store version of Claude Desktop logs there; other installs log to `%APPDATA%\Claude\logs`. Claude Desktop gives a server about 30 seconds to answer, so a log that ends with the transport closing shortly after `initialize` means the server started too slowly.
+2. Version 0.2.0 and later start in well under a second once downloaded. If you are on an older version, `@latest` in the config picks up the fix on the next restart.
+3. To take `npx` out of the picture entirely, install the package once and point Claude Desktop at it with `node`:
+
+   ```
+   npm install -g @cintelisai/adsoptimiser-mcp
+   npm root -g
+   ```
+
+   `npm root -g` prints the global folder, for example `C:\Users\you\AppData\Roaming\npm\node_modules`. Then use:
+
+   ```json
+   {
+     "mcpServers": {
+       "adsoptimiser": {
+         "command": "node",
+         "args": ["C:\\Users\\you\\AppData\\Roaming\\npm\\node_modules\\@cintelisai\\adsoptimiser-mcp\\dist\\server.mjs"]
+       }
+     }
+   }
+   ```
+
+   A global install does not update itself: run `npm install -g @cintelisai/adsoptimiser-mcp` again to upgrade.
 
 ### Claude Code
 
@@ -57,13 +85,25 @@ In any chat: *"connect to Ads Optimiser"*. Claude will call `adsoptimiser_connec
 | `adsoptimiser_get_job` | Status and result URL of one job |
 | `adsoptimiser_list_jobs` | Recent jobs, filterable by status and type |
 | `adsoptimiser_list_pipelines` | Pipeline templates and saved pipelines |
-| `adsoptimiser_run_pipeline` | Start a pipeline run |
+| `adsoptimiser_get_pipeline_nodes` | The pipeline node catalogue: node types, inputs, outputs, params, graph rules and an example |
+| `adsoptimiser_get_pipeline` | A saved pipeline's graph, node count and estimated cost per run |
+| `adsoptimiser_validate_pipeline` | Check a pipeline graph: errors by node, node count, estimated cost, whether it needs a prompt (uses no allowance) |
+| `adsoptimiser_save_pipeline` | Save a pipeline graph to the workspace, or update a saved one by `graph_id`, and link to the pipeline editor |
+| `adsoptimiser_run_pipeline` | Start a pipeline run from a template, a saved pipeline or an inline graph |
 | `adsoptimiser_get_pipeline_run` | Status and results of each pipeline step |
 | `adsoptimiser_upload_file` | Upload a local image or video and get its hosted URL (uses no allowance) |
 | `adsoptimiser_download_job` | Save a finished job's image or video to a local folder |
 | `adsoptimiser_batch_generate` | One job per image in a folder (image-to-video or image edit) or per line of a prompts file, up to 10 per call |
 
 Every generation uses your workspace's monthly plan allowance, exactly as in the app. When the allowance runs out, the tools say so and link to **Billing** (`https://app.adsoptimiser.com.au/#/billing`) where you can upgrade. Videos also count toward a daily video quota.
+
+### Building pipelines
+
+A pipeline is a small graph of steps (up to 12 nodes): for example refine a prompt, generate an image, then animate it into a video. Ask Claude to design one, for example *"build a pipeline that turns my product photo into three 9:16 videos with different voices"*. Claude reads the node catalogue with `adsoptimiser_get_pipeline_nodes`, checks its graph with `adsoptimiser_validate_pipeline` (which reports problems by node, the estimated cost per run and whether a prompt is needed), then saves it with `adsoptimiser_save_pipeline` or runs it directly with `adsoptimiser_run_pipeline`. Saved pipelines open in the app's pipeline editor at `https://app.adsoptimiser.com.au/#/pipeline-editor`.
+
+Where a graph needs one of your own images (an `input_image` node), give its local path as the node's `image_url` (or `image_path`). The file is checked and uploaded, and the hosted URL is put in its place before the graph is validated, saved or run.
+
+Validating and saving use no allowance. Running does: each generation step uses allowance like a single job. Pipeline building needs an Ads Optimiser deployment that allows it for API tokens; on an older one these tools say so and templates and saved pipelines still run.
 
 ### Working with local files
 
@@ -111,7 +151,7 @@ Use **this package** when you want Claude to work with local files: upload produ
 
 Publishing is automated by `.github/workflows/publish.yml`, which runs the tests and publishes to npm with provenance when a version tag is pushed.
 
-1. Bump the version: `npm version patch` (or `minor` / `major`), which updates `package.json` and creates a `vX.Y.Z` commit and tag. Or edit `package.json`, commit, and run `git tag vX.Y.Z`.
+1. Add the release to `CHANGELOG.md`, then bump the version: `npm version patch` (or `minor` / `major`), which updates `package.json` and creates a `vX.Y.Z` commit and tag. Or edit `package.json`, commit, and run `git tag vX.Y.Z`.
 2. Push the commit and the tag: `git push && git push origin vX.Y.Z`.
 
 The workflow fails if the tag does not match `package.json`, and skips publishing (with a notice) if that version is already on npm, so re-running a tag is safe. It needs an `NPM_TOKEN` repository secret: a granular npm automation token with publish rights on the `@cintelisai` scope.
@@ -123,8 +163,13 @@ npm install
 npm test
 ```
 
-Tests use `node --test` against a local stub of the API; they need no network access or account.
+The published bin is `dist/server.mjs`, a single ES module bundled by esbuild (`npm run build`, `scripts/build.mjs`) with the MCP SDK and zod inside it, so the package has no runtime dependencies. `npm test` builds it first; `npm pack` and `npm publish` rebuild it. The licences of the bundled packages ship in `dist/THIRD-PARTY-NOTICES.txt`.
 
-## License
+- `npm start` runs the unbundled source (`server.mjs`); `npm run start:dist` runs the bundle.
+- `npm run smoke` starts the bundle over stdio and times `initialize` and `tools/list`.
+
+Tests use `node --test` against a local stub of the API; they need no network access or account. The bundle tests copy `dist/server.mjs` into an empty folder and drive it over stdio, to prove it runs with no `node_modules`.
+
+## Licence
 
 MIT © Cintelis Pty Limited

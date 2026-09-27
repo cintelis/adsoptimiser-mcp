@@ -114,7 +114,7 @@ export class ApiClient {
   }
 
   /**
-   * @param {"GET"|"POST"|"DELETE"} method
+   * @param {"GET"|"POST"|"PATCH"|"DELETE"} method
    * @param {string} path
    * @param {{ json?: unknown, form?: FormData, auth?: boolean, timeoutMs?: number }} [options]
    */

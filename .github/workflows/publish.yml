@@ -51,10 +51,22 @@ jobs:
 
       - run: npm ci
         if: steps.exists.outputs.already == 'false'
+      # pretest builds dist/server.mjs; the suite includes the bundle tests.
       - run: npm test
         if: steps.exists.outputs.already == 'false'
       - run: npm pack --dry-run
         if: steps.exists.outputs.already == 'false'
+      - name: Install the packed tarball alone and start it
+        if: steps.exists.outputs.already == 'false'
+        run: |
+          npm pack --pack-destination "$RUNNER_TEMP"
+          mkdir "$RUNNER_TEMP/install"
+          cd "$RUNNER_TEMP/install"
+          npm init -y > /dev/null
+          npm install "$RUNNER_TEMP"/cintelisai-adsoptimiser-mcp-*.tgz --no-audit --no-fund
+          node -e "const n = Object.keys(require('./node_modules/.package-lock.json').packages).length; console.log(n + ' package(s) installed'); if (n !== 1) process.exit(1);"
+          node "$GITHUB_WORKSPACE/scripts/smoke.mjs" node_modules/@cintelisai/adsoptimiser-mcp/dist/server.mjs
+      # prepack rebuilds dist/server.mjs from this checkout before publishing.
       - run: npm publish --provenance --access public
         if: steps.exists.outputs.already == 'false'
         env:
