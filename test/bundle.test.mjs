@@ -90,6 +90,15 @@ describe("bundled server (dist/server.mjs)", () => {
       assert.ok(run.inputSchema.properties.graph, "run_pipeline takes an inline graph");
       const save = tools.find((t) => t.name === "adsoptimiser_save_pipeline");
       assert.deepEqual([...save.inputSchema.required].sort(), ["graph", "name"]);
+      const create = tools.find((t) => t.name === "adsoptimiser_create_character");
+      for (const field of ["image_paths", "image_urls", "job_ids", "voice", "default_voice_id"]) {
+        assert.ok(create.inputSchema.properties[field], `create_character takes ${field}`);
+      }
+      const preview = tools.find((t) => t.name === "adsoptimiser_preview_voice");
+      assert.deepEqual([...preview.inputSchema.required], ["voice"]);
+      assert.ok(preview.inputSchema.properties.save_to, "preview_voice takes save_to");
+      const video = tools.find((t) => t.name === "adsoptimiser_generate_video");
+      assert.ok(video.inputSchema.properties.character_id && video.inputSchema.properties.script);
     });
 
     it("answers a tool call", async () => {

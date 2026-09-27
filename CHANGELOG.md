@@ -2,6 +2,25 @@
 
 All notable changes to `@cintelisai/adsoptimiser-mcp` are recorded here. Versions follow [semantic versioning](https://semver.org/).
 
+## 0.3.0 (2026-09-27)
+
+### Added
+
+- Character and voice tools, the same as the hosted connector's:
+  - `adsoptimiser_list_characters` and `adsoptimiser_get_character`: saved characters (consistent AI people such as influencers or brand ambassadors) with their reference images, description, style and voice.
+  - `adsoptimiser_create_character` and `adsoptimiser_update_character`: save a character from 1 to 5 images, with an optional voice (`{ provider: "xai", voice_id }` or `{ provider: "openai", voice, instructions?, xai_voice_id? }`, or the `default_voice_id` shorthand; `null` clears it). As well as `image_urls` and `job_ids`, both accept `image_paths`: local images that are checked and uploaded for you, 5 images in total across all three. Characters cannot be deleted with a token; delete them in the app.
+  - `adsoptimiser_list_voices`: xAI preset voices and OpenAI gpt-4o-mini-tts voices, and whether OpenAI voices are configured.
+  - `adsoptimiser_preview_voice`: a short sample (at most 300 characters) in any voice, with no job and no allowance. Only in this package: `save_to` also saves the mp3 to a local folder so you can play it, with the same folder checks and no-overwrite naming as `adsoptimiser_download_job`.
+- `character_id` on `adsoptimiser_generate_image`, `adsoptimiser_generate_video` and `adsoptimiser_run_pipeline`, and `script` (the exact words spoken to camera) on `adsoptimiser_generate_video`. A character or script with no source image defaults to Grok Video 1.5, which serves reference-to-video. With `character_id`, `adsoptimiser_generate_image` takes at most 4 other reference images.
+- Job summaries include a `Voice:` note when a talking video could not speak a character's OpenAI voice and fell back to an xAI preset.
+- `adsoptimiser_list_pipelines` marks templates that need a `character_id`.
+- The node catalogue from `adsoptimiser_get_pipeline_nodes` carries the new `character` and `add_captions` nodes and the add_voiceover `voice` param with its accepted shapes, and the graph rules explain characters, captions and voice precedence.
+- Clearer errors: a rejected request lists the API's validation errors, and an OpenAI voice on a deployment without OpenAI says to use an xAI preset instead.
+
+### Fixed
+
+- `adsoptimiser_get_pipeline_nodes` read the catalogue's params as an object, but current deployments send an array, so params were listed by position instead of by name. Both shapes now work, and the local descriptions only fill in what the API leaves out.
+
 ## 0.2.0 (2026-09-27)
 
 ### Fixed

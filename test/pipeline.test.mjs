@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { TOOL_ROUTES } from "../src/server.mjs";
-import { graphNeedsRunPrompt, localImageRefs, nodeIdsIn, shapeErrors } from "../src/pipeline.mjs";
+import { compactNodeType, graphNeedsRunPrompt, localImageRefs, nodeIdsIn, shapeErrors } from "../src/pipeline.mjs";
 import { TOKEN, startClient, startStub, tempDir } from "./helpers.mjs";
 
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 1, 2, 3, 4]);
@@ -37,6 +37,75 @@ const CATALOGUE = {
   ],
 };
 const KNOWN = new Set(CATALOGUE.nodes.map((n) => n.type));
+
+/** The add_voiceover voice param exactly as NODE_CATALOG publishes it. */
+const VOICE_PARAM = {
+  name: "voice",
+  type: "object",
+  oneOf: [
+    { provider: { const: "xai" }, voice_id: { enum: ["eve", "leo"] } },
+    {
+      provider: { const: "openai" },
+      voice: { enum: ["cedar", "nova"] },
+      instructions: { type: "string", maxLength: 1000, optional: true, description: "Accent, pacing." },
+    },
+  ],
+  description: "Narrator voice profile.",
+};
+
+/** Current deployments publish params as an array per node (characters v2 and voices). */
+const LIVE_CATALOGUE = {
+  max_nodes: 12,
+  nodes: [
+    {
+      type: "add_voiceover",
+      label: "Add voiceover",
+      inputs: [PROMPT, { name: "video", kind: "video", required: true, maxConnections: 1 }],
+      outputs: [{ name: "video", kind: "video" }],
+      constraints: ["Voice: the node's voice wins."],
+      enums: { voice_id: ["eve", "leo"], audio_mode: ["replace", "mix"] },
+      params: [
+        { name: "script", type: "string", required: true, maxLength: 5000, description: "The words." },
+        VOICE_PARAM,
+        { name: "voice_id", type: "string", enum: ["eve", "leo"], description: "xAI preset." },
+        { name: "audio_mode", type: "string", enum: ["replace", "mix"], default: "replace", description: "Mode." },
+      ],
+    },
+    {
+      type: "character",
+      label: "Character",
+      inputs: [],
+      outputs: [{ name: "images", kind: "image", multi: true, description: "Only a refs input accepts it." }],
+      constraints: ["Free."],
+      enums: {},
+      params: [{ name: "character_id", type: "string", required: true, description: "A saved character id." }],
+    },
+    {
+      type: "add_captions",
+      label: "Add captions",
+      inputs: [
+        { name: "video", kind: "video", required: true, maxConnections: 1 },
+        { name: "text", kind: "text", maxConnections: 1, description: "Caption text." },
+      ],
+      outputs: [{ name: "video", kind: "video" }],
+      constraints: ["Burns captions in."],
+      enums: { position: ["bottom", "center", "top"] },
+      params: [
+        { name: "captions", type: "string", maxLength: 2000, description: "The words to show." },
+        { name: "position", type: "string", enum: ["bottom", "center", "top"], default: "bottom", description: "Where." },
+      ],
+    },
+    {
+      type: "input_image",
+      label: "Your image",
+      inputs: [],
+      outputs: [{ name: "image", kind: "image" }],
+      constraints: [],
+      enums: {},
+      params: [{ name: "image_url", type: "string", required: true, description: "From the API." }],
+    },
+  ],
+};
 
 /** A text-fed image, animated: valid, needs no run prompt. */
 const GRAPH = {
@@ -180,6 +249,63 @@ describe("pipeline builder tools", () => {
     assert.match(res.text, /- image_to_video \(Image to video\)\. Inputs: prompt:text\*, image:image\*\. Outputs: video:video\./);
     assert.match(res.text, /refs:image x5/);
     assert.match(res.text, /adsoptimiser_validate_pipeline/);
+  });
+
+  it("get_pipeline_nodes keeps the live catalogue's params, including character, add_captions and the voice oneOf", async () => {
+    stub.setHandler((r) =>
+      r.path === "/api/v1/pipelines/nodes" ? { json: LIVE_CATALOGUE } : fakeApi(r)
+    );
+    const res = await ctx.call("adsoptimiser_get_pipeline_nodes");
+    assert.equal(res.isError, false, res.text);
+    const byType = Object.fromEntries(res.structured.node_types.map((n) => [n.type, n]));
+    assert.deepEqual(Object.keys(byType), ["add_voiceover", "character", "add_captions", "input_image"]);
+
+    const vo = byType.add_voiceover;
+    assert.deepEqual(Object.keys(vo.params), ["script", "voice", "voice_id", "audio_mode"]);
+    assert.deepEqual(vo.params.voice.one_of, VOICE_PARAM.oneOf);
+    assert.equal(vo.params.voice.type, "object");
+    assert.equal(vo.params.script.max_length, 5000);
+    assert.equal(vo.params.script.required, true);
+    assert.deepEqual(vo.params.voice_id.enum, ["eve", "leo"]);
+    assert.equal(vo.params.audio_mode.default, "replace");
+
+    assert.equal(byType.character.params.character_id.required, true);
+    assert.deepEqual(byType.character.outputs, [
+      { name: "images", kind: "image", description: "Only a refs input accepts it." },
+    ]);
+    assert.deepEqual(byType.add_captions.params.position.enum, ["bottom", "center", "top"]);
+    assert.equal(byType.add_captions.params.captions.max_length, 2000);
+    assert.deepEqual(byType.add_captions.inputs[1], {
+      name: "text",
+      kind: "text",
+      required: false,
+      max_connections: 1,
+      description: "Caption text.",
+    });
+    // The API's description, plus what this local server adds.
+    assert.match(byType.input_image.params.image_url.description, /^From the API\. .*absolute local file path/);
+
+    assert.match(
+      res.text,
+      /voice \(object \{"provider":"xai","voice_id"\} \| \{"provider":"openai","voice","instructions"\?\}, see adsoptimiser_list_voices\)/
+    );
+    assert.match(res.text, /audio_mode \(replace\|mix, default replace\)/);
+    assert.match(res.text, /- character \(Character\)\. Inputs: none\. Outputs: images:image\./);
+    assert.ok(res.structured.rules.some((r) => /character node/.test(r)));
+    assert.ok(res.structured.rules.some((r) => /add_captions burns text/.test(r)));
+    assert.ok(res.structured.rules.some((r) => /add_voiceover voice:.*else eve/.test(r)));
+  });
+
+  it("the enums-only fallback still describes character, add_captions and the voice param", () => {
+    const vo = compactNodeType({ type: "add_voiceover", label: "Voiceover", enums: { voice_id: ["eve"] } });
+    assert.equal(vo.params.voice.type, "object");
+    assert.equal(vo.params.voice.one_of.length, 2);
+    assert.deepEqual(vo.params.voice_id.enum, ["eve"]);
+    const captions = compactNodeType({ type: "add_captions", label: "Captions", enums: { position: ["bottom"] } });
+    assert.deepEqual(captions.params.position.enum, ["bottom"]);
+    assert.equal(captions.params.captions.max_length, 2000);
+    const character = compactNodeType({ type: "character", label: "Character" });
+    assert.equal(character.params.character_id.required, true);
   });
 
   it("get_pipeline returns the saved graph, node count and cost", async () => {

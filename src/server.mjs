@@ -38,6 +38,7 @@ import {
   EXAMPLE_GRAPH,
   GRAPH_RULES,
   MAX_GRAPH_NODES,
+  OPENAI_VOICES,
   compactNodeType,
   describeNodeType,
   localImageRefs,
@@ -57,6 +58,7 @@ export const PACKAGE_VERSION =
 export const CLIENT_NAME = "Claude (MCP)";
 export const MAX_REFERENCE_IMAGES = 5;
 export const MAX_BATCH_ITEMS = 10;
+export const MAX_CHARACTER_IMAGES = 5;
 const DEFAULT_IMAGE_MODEL = "grok-imagine-image-2.0";
 const DEFAULT_VIDEO_MODEL = "grok-imagine-video";
 
@@ -97,6 +99,15 @@ export const TOOL_ROUTES = {
   adsoptimiser_upload_file: ["POST /api/v1/jobs/source-media"],
   adsoptimiser_download_job: ["GET /api/v1/jobs/:id", "GET /media/:key"],
   adsoptimiser_batch_generate: ["POST /api/v1/jobs/source-media", "POST /api/v1/jobs"],
+  adsoptimiser_list_characters: ["GET /api/v1/characters"],
+  adsoptimiser_get_character: ["GET /api/v1/characters/:character_id"],
+  adsoptimiser_create_character: ["POST /api/v1/jobs/source-media", "POST /api/v1/characters"],
+  adsoptimiser_update_character: [
+    "POST /api/v1/jobs/source-media",
+    "PATCH /api/v1/characters/:character_id",
+  ],
+  adsoptimiser_list_voices: ["GET /api/v1/voices"],
+  adsoptimiser_preview_voice: ["POST /api/v1/voices/preview", "GET /media/:key"],
 };
 
 const INSTRUCTIONS = [
@@ -104,6 +115,7 @@ const INSTRUCTIONS = [
   "If a tool says it is not connected, call adsoptimiser_connect and give the user the URL and code; after they approve in the browser, call adsoptimiser_finish_connect.",
   "Every generation uses the workspace's monthly plan allowance, so confirm before generating many at once.",
   "Local files: pass absolute paths. Use adsoptimiser_download_job to save finished media to disk.",
+  "For a consistent AI person (influencer, brand ambassador): generate a character sheet, save the best shots with adsoptimiser_create_character (local files via image_paths), then pass character_id to adsoptimiser_generate_image, adsoptimiser_generate_video or adsoptimiser_run_pipeline. Audition voices with adsoptimiser_preview_voice.",
   `To build a pipeline: call adsoptimiser_get_pipeline_nodes first, use only the node types it lists, keep to ${MAX_GRAPH_NODES} nodes, and check the graph with adsoptimiser_validate_pipeline before saving or running it.`,
 ].join(" ");
 
@@ -117,6 +129,87 @@ const httpsUrl = z
   .regex(/^https:\/\/\S+$/i, "Must be an https:// URL");
 const jobId = z.string().regex(/^[A-Za-z0-9_-]{1,128}$/, "Invalid id");
 const localPath = z.string().trim().min(1).max(4096);
+const characterId = jobId.describe(
+  "A character id from adsoptimiser_list_characters or adsoptimiser_create_character."
+);
+const voiceId = z.string().regex(/^[a-z0-9_-]{1,64}$/, "Invalid voice id");
+
+export const voiceProfileSchema = z
+  .discriminatedUnion("provider", [
+    z
+      .object({
+        provider: z.literal("xai"),
+        voice_id: voiceId.describe("xAI preset (adsoptimiser_list_voices), e.g. eve, leo, rex."),
+      })
+      .strict(),
+    z
+      .object({
+        provider: z.literal("openai"),
+        voice: z.enum(OPENAI_VOICES).describe("OpenAI gpt-4o-mini-tts voice, e.g. cedar."),
+        instructions: z
+          .string()
+          .trim()
+          .max(1000)
+          .optional()
+          .describe(
+            "How to speak: accent, emotion, intonation, pacing, tone, e.g. 'slow, warm, gravelly, rural American accent'."
+          ),
+        xai_voice_id: voiceId
+          .optional()
+          .describe(
+            "xAI preset talking videos use for this character (they cannot speak OpenAI voices). Default eve."
+          ),
+      })
+      .strict(),
+  ])
+  .describe(
+    "A voice profile: an xAI preset, or an OpenAI voice with delivery instructions (narration and previews)."
+  );
+
+const characterFields = {
+  description: z
+    .string()
+    .trim()
+    .max(1000)
+    .optional()
+    .describe(
+      "Appearance and persona notes added to every prompt that uses the character, e.g. '101-year-old man, shaved head, long white beard, warm farmer's hands'."
+    ),
+  style: z
+    .string()
+    .trim()
+    .max(500)
+    .optional()
+    .describe("Look/style notes, e.g. 'realistic skin texture, natural light, not airbrushed'."),
+  image_paths: z
+    .array(localPath)
+    .max(MAX_CHARACTER_IMAGES)
+    .optional()
+    .describe(
+      "Local image files (absolute paths; png, jpg, webp or gif, max 10 MB each) to upload and save as reference images."
+    ),
+  image_urls: z
+    .array(httpsUrl)
+    .max(MAX_CHARACTER_IMAGES)
+    .optional()
+    .describe("https URLs of the character's reference images (e.g. media_url values)."),
+  job_ids: z
+    .array(jobId)
+    .max(MAX_CHARACTER_IMAGES)
+    .optional()
+    .describe("Finished image jobs to save as reference images (the best shots of a character sheet)."),
+  voice: voiceProfileSchema
+    .nullable()
+    .optional()
+    .describe(
+      "The character's voice (adsoptimiser_list_voices): an xAI preset, or an OpenAI voice with instructions used for voiceovers (talking videos then use xai_voice_id, else eve). null clears it."
+    ),
+  default_voice_id: voiceId
+    .optional()
+    .describe(
+      "Shorthand for voice { provider: xai, voice_id } (see adsoptimiser_list_voices), e.g. eve, leo or rex."
+    ),
+};
 
 const graphNodeId = z.string().max(64).describe("Unique node id: 1 to 40 letters, digits or underscores.");
 const pipelineGraph = z
@@ -214,6 +307,11 @@ export const schemas = {
       .optional()
       .describe("Finished image jobs to use as references instead of URLs."),
     seed: z.number().int().min(0).max(2_147_483_647).optional(),
+    character_id: characterId
+      .optional()
+      .describe(
+        "Keep a saved character consistent: its images are added as references (5 in total with reference_image_paths/reference_image_urls/reference_job_ids) and its description is added to the prompt."
+      ),
     wait: z
       .boolean()
       .optional()
@@ -243,7 +341,21 @@ export const schemas = {
       .max(3)
       .optional()
       .describe(
-        "Preset voices (Grok Video 1.5, text-to-video, max 720p). Tag speech in the prompt as <AUDIO_0>..<AUDIO_2>."
+        "Preset voices (Grok Video 1.5, text-to-video, max 720p). Tag speech in the prompt as <AUDIO_0>..<AUDIO_2>. Omit to use the character's default voice."
+      ),
+    character_id: characterId
+      .optional()
+      .describe(
+        "A saved character to star in the video. Without a source image: reference-to-video on Grok Video 1.5 (max 720p) with up to 3 of its images. With a source image: that image stays the first frame and only the character's description is added."
+      ),
+    script: z
+      .string()
+      .trim()
+      .min(1)
+      .max(5000)
+      .optional()
+      .describe(
+        "The exact line spoken to camera (talking video, Grok Video 1.5, text-to-video, max 720p). The voice is voice_ids, else the character's default voice, else eve."
       ),
   }),
   get_job: z.object({ job_id: jobId }),
@@ -272,6 +384,11 @@ export const schemas = {
       .max(4000)
       .optional()
       .describe("The run prompt. Required unless every step gets its prompt elsewhere."),
+    character_id: characterId
+      .optional()
+      .describe(
+        "Fills every character step that has no character chosen. Required for templates marked needs_character (character-talking-clip, character-scene)."
+      ),
   }),
   get_pipeline_run: z.object({ run_id: jobId }),
   get_pipeline_nodes: z.object({}),
@@ -286,6 +403,35 @@ export const schemas = {
     graph_id: jobId
       .optional()
       .describe("Update this saved pipeline instead of creating a new one."),
+  }),
+  list_characters: z.object({}),
+  get_character: z.object({ character_id: characterId }),
+  create_character: z.object({
+    name: z.string().trim().min(1).max(80).describe("Display name, e.g. Amos."),
+    ...characterFields,
+  }),
+  update_character: z.object({
+    character_id: characterId,
+    name: z.string().trim().min(1).max(80).optional(),
+    ...characterFields,
+  }),
+  list_voices: z.object({}),
+  preview_voice: z.object({
+    voice: voiceProfileSchema,
+    text: z
+      .string()
+      .trim()
+      .min(1)
+      .max(300)
+      .optional()
+      .describe("What to say (at most 300 characters). Omit for a default sample line."),
+    save_to: z
+      .string()
+      .max(4096)
+      .optional()
+      .describe(
+        "Also save the sample as an mp3 in this local folder (created if missing) so the user can play it. Use \"\" for the default ./adsoptimiser-output (or ADSOPTIMISER_OUTPUT_DIR)."
+      ),
   }),
   upload_file: z.object({
     path: localPath.describe(
@@ -354,6 +500,54 @@ export const schemas = {
 };
 
 // ---------------------------------------------------------------------------
+// Characters (formatting matches the hosted connector)
+// ---------------------------------------------------------------------------
+
+export function summarizeCharacter(character) {
+  const images = character.images ?? (character.image_urls ?? []).map((url) => ({ url, job_id: null }));
+  return {
+    character_id: character.character_id,
+    name: character.name ?? null,
+    description: character.description ?? null,
+    style: character.style ?? null,
+    voice: character.voice ?? null,
+    default_voice_id: character.default_voice_id ?? null,
+    image_count: images.length,
+    images,
+    updated_at: character.updated_at ?? null,
+  };
+}
+
+/** "leo", or "openai cedar (talking videos: rex)" for an OpenAI voice. */
+export function voiceLabel(summary) {
+  const voice = summary.voice;
+  if (voice?.provider === "openai") {
+    return `openai ${voice.voice} (talking videos: ${voice.xai_voice_id ?? "eve"})`;
+  }
+  return String(voice?.voice_id ?? summary.default_voice_id ?? "none");
+}
+
+function describeCharacter(summary) {
+  const voice = summary.voice;
+  return [
+    `Character ${summary.character_id}: ${summary.name} (${summary.images.length} image(s), voice ${voiceLabel(summary)})`,
+    ...(voice?.provider === "openai" && voice.instructions ? [`Voice instructions: ${voice.instructions}`] : []),
+    ...(summary.description ? [`Description: ${summary.description}`] : []),
+    ...(summary.style ? [`Style: ${summary.style}`] : []),
+    ...summary.images.map((image) => `- ${image.url}${image.job_id ? ` (from ${image.job_id})` : ""}`),
+  ].join("\n");
+}
+
+/** The character body fields shared by create and update (image_paths already resolved). */
+function characterBody(args) {
+  const body = {};
+  for (const key of ["name", "description", "style", "image_urls", "job_ids", "voice", "default_voice_id"]) {
+    if (args[key] !== undefined) body[key] = args[key];
+  }
+  return body;
+}
+
+// ---------------------------------------------------------------------------
 // Server
 // ---------------------------------------------------------------------------
 
@@ -418,6 +612,10 @@ export function createServer(options = {}) {
       thumbnail_url: mediaUrl(job.thumbnail_uri),
       app_url: jobLink(job.job_id),
       error: job.error_detail ?? null,
+      // Set when a talking video could not speak the character's OpenAI voice.
+      ...(typeof job.generation_params?.voice_note === "string"
+        ? { voice_note: job.generation_params.voice_note }
+        : {}),
       created_at: job.created_at ?? null,
       updated_at: job.updated_at ?? null,
     };
@@ -429,6 +627,7 @@ export function createServer(options = {}) {
     ];
     if (summary.media_url) lines.push(`Result: ${summary.media_url}`);
     if (summary.error) lines.push(`Error: ${summary.error}`);
+    if (summary.voice_note) lines.push(`Voice: ${summary.voice_note}`);
     lines.push(`Open in Ads Optimiser: ${summary.app_url}`);
     return lines.join("\n");
   }
@@ -472,6 +671,51 @@ export function createServer(options = {}) {
     return result;
   }
 
+  // Uploaded local files by path, size and modification time, so validating
+  // and then saving or running the same graph (or retrying a character save)
+  // uploads each file once.
+  const uploadedImages = new Map();
+
+  /** Check local images (all of them, before uploading any), then upload each once. */
+  async function uploadLocalImages(paths) {
+    const files = [];
+    for (const p of paths) {
+      const file = await inspectLocalMedia(p, { base: config.cwd, expected: "image" });
+      const { mtimeMs } = await stat(file.path);
+      files.push({ file, key: `${file.path}|${file.size}|${mtimeMs}` });
+    }
+    const results = [];
+    for (const { file, key } of files) {
+      let url = uploadedImages.get(key);
+      if (!url) {
+        url = (await uploadLocal(file)).source_url;
+        uploadedImages.set(key, url);
+      }
+      results.push({ path: file.path, url });
+    }
+    return results;
+  }
+
+  /**
+   * Fetch public media (served by its unguessable key; the token is never
+   * sent) and stream it into `folder` without replacing an existing file
+   * unless asked. `fileName` may be a function of the response content type.
+   */
+  async function downloadMedia(url, folder, fileName, { overwrite = false, what = "the media" } = {}) {
+    let res;
+    try {
+      res = await fetchImpl(url, { signal: AbortSignal.timeout(300_000) });
+    } catch (err) {
+      throw new ApiError(0, "network_error", `Could not download ${url}: ${err?.cause?.code ?? err?.message ?? err}.`);
+    }
+    if (!res.ok || !res.body) {
+      throw new ApiError(res.status || 502, "media_unavailable", `${what} could not be fetched (HTTP ${res.status}).`);
+    }
+    const contentType = res.headers.get("content-type");
+    const name = typeof fileName === "function" ? fileName(contentType) : fileName;
+    return { saved: await saveStream(res.body, folder, name, { overwrite }), contentType };
+  }
+
   function imageParams(args, imageUrls) {
     const params = {};
     if (args.aspect_ratio) params.aspect_ratio = args.aspect_ratio;
@@ -493,13 +737,15 @@ export function createServer(options = {}) {
     return params;
   }
 
-  const createJob = (assetType, prompt, model, params) =>
+  /** `extra` holds top-level job fields (character_id, script); undefined ones are left out. */
+  const createJob = (assetType, prompt, model, params, extra = {}) =>
     api.request("POST", "/api/v1/jobs", {
       json: {
         asset_type: assetType,
         prompt,
         model: model ?? (assetType === "image" ? DEFAULT_IMAGE_MODEL : DEFAULT_VIDEO_MODEL),
         generation_params: params,
+        ...Object.fromEntries(Object.entries(extra).filter(([, v]) => v !== undefined && v !== "")),
       },
     });
 
@@ -535,10 +781,6 @@ export function createServer(options = {}) {
     }
   };
 
-  // Uploaded local files by path, size and modification time, so validating
-  // and then saving or running the same graph uploads each file once.
-  const uploadedImages = new Map();
-
   /**
    * Replace local file paths in input_image nodes with hosted URLs. Every file
    * is checked before any is uploaded. Returns the rewritten copy of the graph.
@@ -553,24 +795,13 @@ export function createServer(options = {}) {
         );
       }
     }
-    const files = [];
-    for (const ref of refs) {
-      const file = await inspectLocalMedia(ref.path, { base: config.cwd, expected: "image" });
-      const { mtimeMs } = await stat(file.path);
-      files.push({ ref, file, key: `${file.path}|${file.size}|${mtimeMs}` });
-    }
-    const uploads = [];
-    for (const { ref, file, key } of files) {
-      let url = uploadedImages.get(key);
-      if (!url) {
-        url = (await uploadLocal(file)).source_url;
-        uploadedImages.set(key, url);
-      }
-      const params = { ...(ref.node.params ?? {}), image_url: url };
+    const uploaded = await uploadLocalImages(refs.map((ref) => ref.path));
+    const uploads = refs.map((ref, i) => {
+      const params = { ...(ref.node.params ?? {}), image_url: uploaded[i].url };
       delete params.image_path;
       ref.node.params = params;
-      uploads.push({ node_id: ref.node.id, path: file.path, image_url: url });
-    }
+      return { node_id: ref.node.id, path: uploaded[i].path, image_url: uploaded[i].url };
+    });
     return { graph, uploads };
   }
 
@@ -852,7 +1083,7 @@ export function createServer(options = {}) {
   tool(
     "adsoptimiser_generate_image",
     "Generate an image",
-    "Generate an ad image with Grok (or Luma where enabled). Uses one image generation from the workspace's monthly plan allowance. Usually returns the finished image URL; if it takes longer, returns the job id to check with adsoptimiser_get_job. To edit or restyle existing images pass reference_image_paths (local files, uploaded for you), reference_image_urls or reference_job_ids.",
+    "Generate an ad image with Grok (or Luma where enabled). Uses one image generation from the workspace's monthly plan allowance. Usually returns the finished image URL; if it takes longer, returns the job id to check with adsoptimiser_get_job. To edit or restyle existing images pass reference_image_paths (local files, uploaded for you), reference_image_urls or reference_job_ids. For an AI influencer, first generate a character sheet (the same person from several angles, a full-body shot and a close-up, neutral white background, realistic unretouched skin), save the best shots with adsoptimiser_create_character, then pass character_id to place that person in new scenes (porch, kitchen, garden...).",
     schemas.generate_image,
     { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     async (args) => {
@@ -860,8 +1091,13 @@ export function createServer(options = {}) {
         (args.reference_image_paths?.length ?? 0) +
         (args.reference_image_urls?.length ?? 0) +
         (args.reference_job_ids?.length ?? 0);
-      if (total > MAX_REFERENCE_IMAGES) {
-        return fail(`At most ${MAX_REFERENCE_IMAGES} reference images can be used in one generation.`);
+      // A character's images share the provider's 5 slots.
+      if (total > (args.character_id ? MAX_REFERENCE_IMAGES - 1 : MAX_REFERENCE_IMAGES)) {
+        return fail(
+          args.character_id
+            ? `With character_id at most ${MAX_REFERENCE_IMAGES - 1} other reference images can be used (${MAX_REFERENCE_IMAGES} in total).`
+            : `At most ${MAX_REFERENCE_IMAGES} reference images can be used in one generation.`
+        );
       }
       // Check every local file before uploading any of them.
       const files = [];
@@ -874,7 +1110,9 @@ export function createServer(options = {}) {
       }
       for (const file of files) imageUrls.push((await uploadLocal(file)).source_url);
 
-      let job = await createJob("image", args.prompt, args.model, imageParams(args, imageUrls));
+      let job = await createJob("image", args.prompt, args.model, imageParams(args, imageUrls), {
+        character_id: args.character_id,
+      });
       const waitMs = args.wait === false ? 0 : config.imageWaitSeconds * 1000;
       const polls = Math.floor(waitMs / config.pollIntervalMs);
       for (let i = 0; i < polls && (job.status === "queued" || job.status === "generating"); i++) {
@@ -895,7 +1133,7 @@ export function createServer(options = {}) {
   tool(
     "adsoptimiser_generate_video",
     "Generate a video",
-    "Start an ad video generation (text-to-video, or image-to-video from source_image_path, source_image_url or source_job_id). Uses one video generation from the plan allowance and counts toward the daily video quota. Returns immediately with a job id; videos take one to several minutes, so check progress with adsoptimiser_get_job.",
+    "Start an ad video generation (text-to-video, or image-to-video from source_image_path, source_image_url or source_job_id). Uses one video generation from the plan allowance and counts toward the daily video quota. Returns immediately with a job id; videos take one to several minutes, so check progress with adsoptimiser_get_job. For a consistent AI influencer pass character_id: with script (the exact words) and no source image you get a 9:16 talking-to-camera clip in the character's voice (talking videos speak xAI preset voices); for silent b-roll, animate a scene image of the character (source_job_id from adsoptimiser_generate_image with character_id) and add on-screen text with a pipeline's add_captions step.",
     schemas.generate_video,
     { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     async (args) => {
@@ -914,7 +1152,16 @@ export function createServer(options = {}) {
         });
         sourceImage = (await uploadLocal(file)).source_url;
       }
-      const job = await createJob("video", args.prompt, args.model, videoParams(args, sourceImage));
+      // A character or a script without a first frame is reference-to-video,
+      // which only Grok Video 1.5 serves.
+      const referenceToVideo = !sourceImage && Boolean(args.character_id || args.script);
+      const job = await createJob(
+        "video",
+        args.prompt,
+        args.model ?? (referenceToVideo ? "grok-imagine-video-1.5" : DEFAULT_VIDEO_MODEL),
+        videoParams(args, sourceImage),
+        { character_id: args.character_id, script: args.script }
+      );
       const summary = summarizeJob(job);
       if (job.status === "failed") return fail(describeJob(summary), summary);
       return ok(
@@ -977,6 +1224,7 @@ export function createServer(options = {}) {
         name: t.name,
         description: t.description,
         steps: t.stages,
+        needs_character: t.needs_character === true,
       }));
       const savedList = (graphs.graphs ?? []).map((g) => ({
         graph_id: g.graph_id,
@@ -986,7 +1234,12 @@ export function createServer(options = {}) {
       }));
       const lines = [
         "Templates:",
-        ...templateList.map((t) => `- ${t.template_id}: ${t.name}. ${t.description ?? ""}`),
+        ...templateList.map(
+          (t) =>
+            `- ${t.template_id}: ${t.name}. ${t.description ?? ""}${
+              t.needs_character ? " (pass character_id to adsoptimiser_run_pipeline)" : ""
+            }`
+        ),
         "Saved pipelines:",
         ...(savedList.length
           ? savedList.map((g) => `- ${g.graph_id}: ${g.name}`)
@@ -999,7 +1252,7 @@ export function createServer(options = {}) {
   tool(
     "adsoptimiser_run_pipeline",
     "Run a pipeline",
-    `Start a pipeline run from exactly one of: a template_id or saved graph_id (see adsoptimiser_list_pipelines), or an unsaved graph. An inline graph must use only node types from adsoptimiser_get_pipeline_nodes, keep to ${MAX_GRAPH_NODES} nodes, and should pass adsoptimiser_validate_pipeline first; it is validated again here and not run if invalid. Local image paths in input_image nodes are uploaded for you. Each generation step uses plan allowance like a single job (video steps also count toward the daily video quota), so confirm with the user before running. Returns the run id, step count and estimated provider cost; check progress with adsoptimiser_get_pipeline_run.`,
+    `Start a pipeline run from exactly one of: a template_id or saved graph_id (see adsoptimiser_list_pipelines), or an unsaved graph. An inline graph must use only node types from adsoptimiser_get_pipeline_nodes, keep to ${MAX_GRAPH_NODES} nodes, and should pass adsoptimiser_validate_pipeline first; it is validated again here and not run if invalid. Local image paths in input_image nodes are uploaded for you. character_id fills every character step that has none (required by templates marked needs_character). Each generation step uses plan allowance like a single job (video steps also count toward the daily video quota), so confirm with the user before running. Returns the run id, step count and estimated provider cost; check progress with adsoptimiser_get_pipeline_run.`,
     schemas.run_pipeline,
     { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     async (args) => {
@@ -1030,6 +1283,7 @@ export function createServer(options = {}) {
           body = args.graph_id ? { graph_id: args.graph_id } : { template_id: args.template_id };
         }
         if (args.prompt) body.prompt = args.prompt;
+        if (args.character_id) body.character_id = args.character_id;
         const result = await api.request("POST", "/api/v1/pipelines", { json: body });
         const run = result.run ?? {};
         const steps = (result.stages ?? []).map((s) => s.stage_type);
@@ -1200,6 +1454,210 @@ export function createServer(options = {}) {
   );
 
   // -------------------------------------------------------------------------
+  // Characters and voices (same tools as the hosted connector, plus local
+  // image files and saving voice previews)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Check the image count across image_paths, image_urls and job_ids, then
+   * upload local files and put their hosted URLs after image_urls. Returns the
+   * args with image_paths resolved, or an error message.
+   */
+  async function resolveCharacterImages(args, { requireOne }) {
+    const paths = args.image_paths ?? [];
+    const total = paths.length + (args.image_urls?.length ?? 0) + (args.job_ids?.length ?? 0);
+    if (requireOne && total === 0) {
+      return {
+        error: `Pass at least one of image_paths, image_urls or job_ids (1 to ${MAX_CHARACTER_IMAGES} images in total).`,
+      };
+    }
+    if (total > MAX_CHARACTER_IMAGES) {
+      return {
+        error: `A character has at most ${MAX_CHARACTER_IMAGES} reference images (image_paths, image_urls and job_ids combined).`,
+      };
+    }
+    const { image_paths: _paths, ...rest } = args;
+    if (args.image_paths === undefined) return { args: rest, uploads: [] };
+    const uploads = await uploadLocalImages(paths);
+    return {
+      args: { ...rest, image_urls: [...(args.image_urls ?? []), ...uploads.map((u) => u.url)] },
+      uploads,
+    };
+  }
+
+  const describeImageUploads = (uploads) =>
+    uploads.length ? `\nUploaded ${uploads.length} local image${uploads.length === 1 ? "" : "s"}.` : "";
+
+  tool(
+    "adsoptimiser_list_characters",
+    "List characters",
+    "List the workspace's saved characters (consistent AI people such as influencers or brand ambassadors) with their reference images, description, style and default voice. Use a character_id with adsoptimiser_generate_image, adsoptimiser_generate_video or adsoptimiser_run_pipeline to keep the same person across scenes and videos.",
+    schemas.list_characters,
+    { readOnlyHint: true, openWorldHint: false },
+    async () => {
+      const result = await api.request("GET", "/api/v1/characters");
+      const characters = (result.characters ?? []).map(summarizeCharacter);
+      const lines = characters.map(
+        (c) =>
+          `- ${c.character_id}: ${c.name} (${c.image_count} image(s), voice ${voiceLabel(c)})${
+            c.description ? `: ${String(c.description).slice(0, 120)}` : ""
+          }`
+      );
+      return ok(
+        characters.length
+          ? `${characters.length} character(s):\n${lines.join("\n")}`
+          : "No characters yet. Generate a character sheet with adsoptimiser_generate_image, then save the best images with adsoptimiser_create_character.",
+        { characters }
+      );
+    }
+  );
+
+  tool(
+    "adsoptimiser_get_character",
+    "Get a character",
+    "Get one saved character with every reference image URL (and the job each came from), its description, style and default voice.",
+    schemas.get_character,
+    { readOnlyHint: true, openWorldHint: false },
+    async ({ character_id }) => {
+      const character = await api.request("GET", `/api/v1/characters/${encodeURIComponent(character_id)}`);
+      const summary = summarizeCharacter(character);
+      return ok(describeCharacter(summary), summary);
+    }
+  );
+
+  tool(
+    "adsoptimiser_create_character",
+    "Create a character",
+    `Save a consistent character from 1 to ${MAX_CHARACTER_IMAGES} reference images: job_ids of finished image jobs (usually the best shots of a character sheet: front, three-quarter and side angles, a full-body shot and a close-up on a neutral white background with realistic skin), https image_urls, and/or image_paths (local files, checked and uploaded for you). Add a description (age, face, hair, build, persona) and optionally style notes and a voice (adsoptimiser_list_voices; audition it with adsoptimiser_preview_voice). Then pass the character_id to adsoptimiser_generate_image for new scenes and to adsoptimiser_generate_video for talking clips. Uses no generation allowance. Needs member (not viewer) role. Characters cannot be deleted from here; delete them in the app.`,
+    schemas.create_character,
+    { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    async (args) => {
+      const resolved = await resolveCharacterImages(args, { requireOne: true });
+      if (resolved.error) return fail(resolved.error);
+      const character = await api.request("POST", "/api/v1/characters", { json: characterBody(resolved.args) });
+      const summary = summarizeCharacter(character);
+      return ok(
+        `Created ${describeCharacter(summary)}${describeImageUploads(resolved.uploads)}\nUse character_id ${summary.character_id} with adsoptimiser_generate_image, adsoptimiser_generate_video or adsoptimiser_run_pipeline.`,
+        summary
+      );
+    }
+  );
+
+  tool(
+    "adsoptimiser_update_character",
+    "Update a character",
+    `Change a saved character's name, description, style, voice or reference images. Passing image_paths, image_urls and/or job_ids replaces the whole image list (1 to ${MAX_CHARACTER_IMAGES} images; adsoptimiser_get_character shows the current URLs, so include the ones to keep). For iterations like 'make him older', generate new images with the character as reference, then save the best ones here. Uses no generation allowance. Characters cannot be deleted from here; delete them in the app.`,
+    schemas.update_character,
+    { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+    async ({ character_id, ...rest }) => {
+      if (Object.keys(characterBody(rest)).length === 0 && rest.image_paths === undefined) {
+        return fail("Nothing to update: pass at least one field to change.");
+      }
+      const resolved = await resolveCharacterImages(rest, { requireOne: false });
+      if (resolved.error) return fail(resolved.error);
+      const character = await api.request("PATCH", `/api/v1/characters/${encodeURIComponent(character_id)}`, {
+        json: characterBody(resolved.args),
+      });
+      const summary = summarizeCharacter(character);
+      return ok(`Updated ${describeCharacter(summary)}${describeImageUploads(resolved.uploads)}`, summary);
+    }
+  );
+
+  tool(
+    "adsoptimiser_list_voices",
+    "List voices",
+    "List the voices: xAI presets (talking videos, voiceovers, a character's default_voice_id) and OpenAI gpt-4o-mini-tts voices (voiceovers and previews, steered with instructions such as accent, pacing and tone), plus whether OpenAI voices are configured. Read-only.",
+    schemas.list_voices,
+    { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+    async () => {
+      const catalog = await api.request("GET", "/api/v1/voices");
+      const xai = catalog.providers?.xai?.voice_ids ?? [];
+      const openAi = catalog.providers?.openai;
+      const openAiVoices = openAi?.voices ?? [];
+      const configured = openAi?.configured === true;
+      const lines = [
+        `xAI preset voices: ${xai.join(", ") || "none"} (talking videos and voiceovers; default eve).`,
+        `OpenAI voices (${openAi?.model ?? "gpt-4o-mini-tts"}): ${openAiVoices.join(", ") || "none"} (voiceovers and previews; add instructions for accent, emotion, pacing and tone).`,
+        configured
+          ? "OpenAI voices are available."
+          : `OpenAI voices are not available: ${openAi?.message ?? "not configured on this deployment."}`,
+        ...(catalog.rules ?? []).map((rule) => `- ${rule}`),
+        "Hear one with adsoptimiser_preview_voice (save_to also saves the mp3 locally) before saving it to a character.",
+      ];
+      return ok(lines.join("\n"), {
+        voice_ids: xai,
+        xai_voice_ids: xai,
+        openai_voices: openAiVoices,
+        openai_configured: configured,
+        voices: catalog.voices ?? [],
+        preview: catalog.preview ?? null,
+        rules: catalog.rules ?? [],
+      });
+    }
+  );
+
+  /**
+   * Where to fetch a preview from: only ever this deployment's /media route,
+   * built from storage_uri like job media, or media_url when it points there.
+   */
+  function previewDownloadUrl(preview) {
+    if (typeof preview.storage_uri === "string" && preview.storage_uri) return mediaUrl(preview.storage_uri);
+    if (typeof preview.media_url !== "string") return null;
+    try {
+      const candidate = new URL(preview.media_url);
+      const ours = new URL(baseUrl);
+      return candidate.origin === ours.origin && candidate.pathname.startsWith("/media/") ? candidate.href : null;
+    } catch {
+      return null;
+    }
+  }
+
+  tool(
+    "adsoptimiser_preview_voice",
+    "Preview a voice",
+    "Synthesise a short sample (at most 300 characters) in a voice profile and return a playable audio URL, e.g. to audition an OpenAI voice with instructions before saving it to a character. With save_to, the mp3 is also saved to that local folder so the user can play it. Creates no job and uses no plan allowance; limited to 10 previews a minute, and repeats of the same voice and text are served from cache.",
+    schemas.preview_voice,
+    // Not read-only: save_to writes a local file.
+    { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    async ({ voice, text, save_to }) => {
+      // Refuse a bad folder before anything is synthesised.
+      const folder = save_to !== undefined ? resolveOutputFolder(save_to, config.output) : null;
+      const preview = await api.request("POST", "/api/v1/voices/preview", {
+        json: { voice, ...(text ? { text } : {}) },
+      });
+      const label = voice.provider === "openai" ? `OpenAI ${voice.voice}` : `xAI ${voice.voice_id}`;
+      const structured = {
+        media_url: preview.media_url,
+        content_type: preview.content_type ?? "audio/mpeg",
+        text: preview.text ?? null,
+        cached: preview.cached === true,
+        voice: preview.voice ?? voice,
+      };
+      const lines = [`Preview of ${label}: ${preview.media_url}`, `Said: "${preview.text ?? ""}"`];
+      if (folder) {
+        const url = previewDownloadUrl(preview);
+        if (!url) {
+          lines.push("Not saved locally: the preview did not come from this Ads Optimiser deployment's media.");
+        } else {
+          const name = voice.provider === "openai" ? voice.voice : voice.voice_id;
+          const { saved } = await downloadMedia(
+            url,
+            folder,
+            downloadFileName(`voice-preview-${voice.provider}-${name}`, preview.text ?? text, ".mp3"),
+            { what: "The voice preview" }
+          );
+          structured.path = saved.path;
+          structured.bytes = saved.bytes;
+          lines.push(
+            `Saved ${saved.path}${saved.renamed ? " (a file with that name already existed, so a numbered name was used)" : ""}.`
+          );
+        }
+      }
+      return ok(lines.join("\n"), structured);
+    }
+  );
+
+  // -------------------------------------------------------------------------
   // Local files
   // -------------------------------------------------------------------------
 
@@ -1244,25 +1702,17 @@ export function createServer(options = {}) {
             : "";
         return fail(`Job ${job_id} is ${job.status ?? "not ready"}; only ready jobs can be downloaded.${next}`);
       }
-      const url = mediaUrl(job.storage_uri);
-      let res;
-      try {
-        // Media is served publicly by its unguessable key; the token is not sent.
-        res = await fetchImpl(url, { signal: AbortSignal.timeout(300_000) });
-      } catch (err) {
-        throw new ApiError(0, "network_error", `Could not download ${url}: ${err?.cause?.code ?? err?.message ?? err}.`);
-      }
-      if (!res.ok || !res.body) {
-        throw new ApiError(res.status || 502, "media_unavailable", `The media for job ${job_id} could not be fetched (HTTP ${res.status}).`);
-      }
-      const ext = extensionFor({
-        storageUri: job.storage_uri,
-        contentType: res.headers.get("content-type"),
-        assetType: job.asset_type,
-      });
-      const saved = await saveStream(res.body, target, downloadFileName(job.job_id ?? job_id, job.prompt, ext), {
-        overwrite: overwrite === true,
-      });
+      const { saved } = await downloadMedia(
+        mediaUrl(job.storage_uri),
+        target,
+        (contentType) =>
+          downloadFileName(
+            job.job_id ?? job_id,
+            job.prompt,
+            extensionFor({ storageUri: job.storage_uri, contentType, assetType: job.asset_type })
+          ),
+        { overwrite: overwrite === true, what: `The media for job ${job_id}` }
+      );
       const note = saved.renamed ? " (a file with the intended name already existed, so a numbered name was used)" : "";
       return ok(`Saved ${saved.path} (${(saved.bytes / 1024 / 1024).toFixed(2)} MB)${note}.`, {
         job_id: job.job_id ?? job_id,
