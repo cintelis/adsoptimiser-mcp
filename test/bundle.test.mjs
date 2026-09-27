@@ -97,6 +97,12 @@ describe("bundled server (dist/server.mjs)", () => {
       const preview = tools.find((t) => t.name === "adsoptimiser_preview_voice");
       assert.deepEqual([...preview.inputSchema.required], ["voice"]);
       assert.ok(preview.inputSchema.properties.save_to, "preview_voice takes save_to");
+      assert.ok(preview.inputSchema.properties.character_id, "preview_voice takes character_id");
+      const assets = tools.find((t) => t.name === "adsoptimiser_list_character_assets");
+      assert.deepEqual([...assets.inputSchema.required], ["character_id"]);
+      for (const field of ["type", "cursor", "limit", "download_to"]) {
+        assert.ok(assets.inputSchema.properties[field], `list_character_assets takes ${field}`);
+      }
       const video = tools.find((t) => t.name === "adsoptimiser_generate_video");
       assert.ok(video.inputSchema.properties.character_id && video.inputSchema.properties.script);
     });

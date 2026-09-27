@@ -93,11 +93,12 @@ In any chat: *"connect to Ads Optimiser"*. Claude will call `adsoptimiser_connec
 | `adsoptimiser_run_pipeline` | Start a pipeline run from a template, a saved pipeline or an inline graph, optionally with a `character_id` |
 | `adsoptimiser_get_pipeline_run` | Status and results of each pipeline step |
 | `adsoptimiser_list_characters` | Saved characters with their images, description, style and voice |
-| `adsoptimiser_get_character` | One character with every reference image and the job it came from |
+| `adsoptimiser_get_character` | One character with every reference image and the job it came from, plus counts of what was made with it, the latest items and the latest voice previews |
+| `adsoptimiser_list_character_assets` | Everything made with a character, filterable by type and paged; with `download_to` the finished files and speech mp3s are saved locally |
 | `adsoptimiser_create_character` | Save a character from 1 to 5 images: local files (`image_paths`), URLs or finished jobs, with an optional voice (uses no allowance) |
 | `adsoptimiser_update_character` | Change a character's name, description, style, voice or images (uses no allowance) |
 | `adsoptimiser_list_voices` | xAI preset voices and OpenAI voices, and whether OpenAI voices are available |
-| `adsoptimiser_preview_voice` | A short sample in any voice as a playable URL, and with `save_to` an mp3 saved locally (uses no allowance) |
+| `adsoptimiser_preview_voice` | A short sample in any voice as a playable URL, optionally filed in a character's preview history, and with `save_to` an mp3 saved locally (uses no allowance) |
 | `adsoptimiser_upload_file` | Upload a local image or video and get its hosted URL (uses no allowance) |
 | `adsoptimiser_download_job` | Save a finished job's image or video to a local folder |
 | `adsoptimiser_batch_generate` | One job per image in a folder (image-to-video or image edit) or per line of a prompts file, up to 10 per call |
@@ -127,6 +128,8 @@ Talking clips in a designed voice now work through lip-sync. There are two ways:
 - **Step by step:** make a 2 to 10 second clip at 720p or 1080p (not 480p) with `adsoptimiser_generate_video`, then call `adsoptimiser_lip_sync` with its job id (or a URL, or a local .mp4 or .mov up to 100 MB as `video_path`) and the `script`. The line must fit the clip: speech runs about 15 characters a second, so about 20 words for an 8 second clip. The voice is `voice`, else the character's voice, else eve.
 
 Each lip-sync uses one video generation from the plan allowance and counts toward the daily video quota. It takes 2 to 5 minutes; follow it with `adsoptimiser_get_job`.
+
+**Everything made with a character** is gathered on its page in the app's **Characters** section: images, videos, talking clips, lip-syncs, voiceovers and captioned clips, the lines it has spoken and its voice previews. From Claude, `adsoptimiser_get_character` gives the counts per kind, the latest items and the latest voice previews, and `adsoptimiser_list_character_assets` lists the whole gallery, filtered by `type` and paged with `cursor`. Ask for *"save everything Amos has made to my Desktop"* and Claude passes `download_to`: the finished images and videos, and the speech mp3 kept with each lip-sync and voiceover, are saved to that folder, up to 20 files per call, without replacing existing files. Pass `character_id` to `adsoptimiser_preview_voice` to keep a preview in that character's history; to save a preview locally, preview the same voice and text again with `save_to` (a repeat is served from cache). On an older Ads Optimiser deployment without the Characters hub, `adsoptimiser_get_character` still returns the character and `adsoptimiser_list_character_assets` says the hub is not available.
 
 `adsoptimiser_generate_video` with a `script` still speaks only xAI preset voices: a character with an OpenAI voice uses its `xai_voice_id` (else eve) there, and the job's `Voice:` note says so. OpenAI voices also narrate: an `add_voiceover` step speaks over a finished video in the character's voice. Characters are edited with `adsoptimiser_update_character` and deleted only in the app. Saving characters and previewing voices use no allowance.
 

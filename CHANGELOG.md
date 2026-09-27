@@ -2,6 +2,18 @@
 
 All notable changes to `@cintelisai/adsoptimiser-mcp` are recorded here. Versions follow [semantic versioning](https://semver.org/).
 
+## 0.5.0 (2026-09-28)
+
+### Added
+
+- `adsoptimiser_list_character_assets`, the same as the hosted connector's `list_character_assets`: everything made with a saved character, newest first (images, videos, talking clips, lip-syncs, voiceovers and captioned clips), with result URLs, the kept speech audio (`speech_url`), the line spoken (`script`), the voice and the pipeline run. Takes `character_id` and optionally `type` (`image`, `video`, `talking`, `lip_sync`, `voiceover` or `captions`), `cursor` (the `next_cursor` of the previous page) and `limit` (1 to 50, default 10), and reports counts per kind. Only in this package: `download_to`, a local folder where the listed finished files are saved (images, videos and the speech mp3s kept with lip-syncs and voiceovers), at most 20 files per call. Files are fetched only from this Ads Optimiser deployment's media, never with the token, are named `<job id>-<script or prompt words>` (`<job id>-speech-...mp3` for speech), and never replace an existing file. Folder paths containing `..` are refused before anything is called. Files over the cap are listed by job so a smaller page can pick them up.
+- `adsoptimiser_get_character` now also summarises what was made with the character, as the connector does: counts per kind, the latest 5 items and the latest 3 voice previews. Only in this package: an `audio` list gathers the kept speech and voice preview URLs, and the reply says how to save them locally (speech with `download_to`, a preview with `adsoptimiser_preview_voice` and `save_to`).
+- `adsoptimiser_preview_voice` takes an optional `character_id` to file the preview in that character's voice preview history (shown on its page in the app), and returns the `preview_id`.
+
+### Changed
+
+- On a deployment without the Characters hub, `adsoptimiser_get_character` still returns the character (the summary is left out), and `adsoptimiser_list_character_assets` says the deployment predates the hub instead of reporting the character as not found.
+
 ## 0.4.0 (2026-09-27)
 
 ### Added
