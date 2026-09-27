@@ -111,7 +111,7 @@ function makeApi(state) {
 
 function routeOf(r) {
   const path = r.path
-    .replace(/^\/api\/v1\/characters\/[^/]+$/, "/api/v1/characters/:character_id")
+    .replace(/^\/api\/v1\/characters\/[^/]+(\/assets|\/voice-previews)?$/, "/api/v1/characters/:character_id$1")
     .replace(/^\/api\/v1\/jobs\/(?!enhance-prompt$|source-media$)[^/]+$/, "/api/v1/jobs/:id")
     .replace(/^\/media\/[^/]+$/, "/media/:key");
   return `${r.method} ${path}`;

@@ -60,6 +60,10 @@ export const CLIENT_NAME = "Claude (MCP)";
 export const MAX_REFERENCE_IMAGES = 5;
 export const MAX_BATCH_ITEMS = 10;
 export const MAX_CHARACTER_IMAGES = 5;
+/** Files list_character_assets saves per call with download_to. */
+export const MAX_CHARACTER_DOWNLOADS = 20;
+/** Characters hub: the kinds of job a character's gallery holds. */
+export const CHARACTER_ASSET_KINDS = ["image", "video", "talking", "lip_sync", "voiceover", "captions"];
 /** Kling LipSync refuses source clips over 100 MB (the upload route allows 120). */
 export const MAX_LIP_SYNC_VIDEO_BYTES = 100 * 1024 * 1024;
 export const MAX_LIP_SYNC_SCRIPT_CHARS = 900;
@@ -111,7 +115,17 @@ export const TOOL_ROUTES = {
   adsoptimiser_download_job: ["GET /api/v1/jobs/:id", "GET /media/:key"],
   adsoptimiser_batch_generate: ["POST /api/v1/jobs/source-media", "POST /api/v1/jobs"],
   adsoptimiser_list_characters: ["GET /api/v1/characters"],
-  adsoptimiser_get_character: ["GET /api/v1/characters/:character_id"],
+  adsoptimiser_get_character: [
+    "GET /api/v1/characters/:character_id",
+    "GET /api/v1/characters/:character_id/assets",
+    "GET /api/v1/characters/:character_id/voice-previews",
+  ],
+  adsoptimiser_list_character_assets: [
+    "GET /api/v1/characters/:character_id/assets",
+    // Only after a 404, to tell an unknown character from an older deployment.
+    "GET /api/v1/characters/:character_id",
+    "GET /media/:key",
+  ],
   adsoptimiser_create_character: ["POST /api/v1/jobs/source-media", "POST /api/v1/characters"],
   adsoptimiser_update_character: [
     "POST /api/v1/jobs/source-media",
@@ -126,7 +140,7 @@ const INSTRUCTIONS = [
   "If a tool says it is not connected, call adsoptimiser_connect and give the user the URL and code; after they approve in the browser, call adsoptimiser_finish_connect.",
   "Every generation uses the workspace's monthly plan allowance, so confirm before generating many at once.",
   "Local files: pass absolute paths. Use adsoptimiser_download_job to save finished media to disk.",
-  "For a consistent AI person (influencer, brand ambassador): generate a character sheet, save the best shots with adsoptimiser_create_character (local files via image_paths), then pass character_id to adsoptimiser_generate_image, adsoptimiser_generate_video or adsoptimiser_run_pipeline. Audition voices with adsoptimiser_preview_voice. For a talking clip in a designed (OpenAI) voice, lip-sync a finished clip with adsoptimiser_lip_sync, or run the character-lip-sync template.",
+  "For a consistent AI person (influencer, brand ambassador): generate a character sheet, save the best shots with adsoptimiser_create_character (local files via image_paths), then pass character_id to adsoptimiser_generate_image, adsoptimiser_generate_video or adsoptimiser_run_pipeline. Audition voices with adsoptimiser_preview_voice. adsoptimiser_get_character summarises what was made with a character; adsoptimiser_list_character_assets lists it all and saves files locally with download_to. For a talking clip in a designed (OpenAI) voice, lip-sync a finished clip with adsoptimiser_lip_sync, or run the character-lip-sync template.",
   `To build a pipeline: call adsoptimiser_get_pipeline_nodes first, use only the node types it lists, keep to ${MAX_GRAPH_NODES} nodes, and check the graph with adsoptimiser_validate_pipeline before saving or running it.`,
 ].join(" ");
 
@@ -450,6 +464,28 @@ export const schemas = {
   }),
   list_characters: z.object({}),
   get_character: z.object({ character_id: characterId }),
+  list_character_assets: z.object({
+    character_id: characterId,
+    type: z
+      .enum(CHARACTER_ASSET_KINDS)
+      .optional()
+      .describe(
+        "Only this kind: image, video, talking (Grok video speaking a preset voice), lip_sync, voiceover or captions."
+      ),
+    cursor: z
+      .string()
+      .max(512)
+      .optional()
+      .describe("next_cursor from a previous call, for the next (older) page."),
+    limit: z.number().int().min(1).max(50).optional().describe("Items per page (default 10)."),
+    download_to: z
+      .string()
+      .max(4096)
+      .optional()
+      .describe(
+        `Also save the listed finished assets (images, videos and kept speech mp3s) in this local folder (created if missing), at most ${MAX_CHARACTER_DOWNLOADS} files per call. Use "" for the default ./adsoptimiser-output (or ADSOPTIMISER_OUTPUT_DIR). Existing files are never replaced.`
+      ),
+  }),
   create_character: z.object({
     name: z.string().trim().min(1).max(80).describe("Display name, e.g. Amos."),
     ...characterFields,
@@ -469,6 +505,9 @@ export const schemas = {
       .max(300)
       .optional()
       .describe("What to say (at most 300 characters). Omit for a default sample line."),
+    character_id: characterId
+      .optional()
+      .describe("Record the preview in this character's voice preview history."),
     save_to: z
       .string()
       .max(4096)
@@ -582,6 +621,43 @@ function describeCharacter(summary) {
   ].join("\n");
 }
 
+/** One gallery item, as the hosted connector summarises it. */
+export function summarizeAsset(asset, jobLink) {
+  return {
+    job_id: asset.job_id,
+    kind: asset.kind ?? null,
+    asset_type: asset.asset_type ?? null,
+    status: asset.status ?? null,
+    model: asset.model ?? null,
+    media_url: asset.media_url ?? null,
+    thumbnail_url: asset.thumbnail_url ?? null,
+    speech_url: asset.speech_url ?? null,
+    script: asset.script ?? null,
+    voice: asset.voice ?? null,
+    pipeline_run_id: asset.pipeline_run_id ?? null,
+    app_url: jobLink(asset.job_id),
+    created_at: asset.created_at ?? null,
+  };
+}
+
+function describeAsset(asset) {
+  return [
+    `- ${asset.job_id} ${asset.kind ?? asset.asset_type} ${asset.status}`,
+    asset.media_url ? ` ${asset.media_url}` : "",
+    asset.speech_url ? ` (speech ${asset.speech_url})` : "",
+    asset.script ? ` says "${String(asset.script).slice(0, 80)}"` : "",
+  ].join("");
+}
+
+/** "3 image, 1 talking" from a counts object (zero kinds omitted). */
+export function describeCounts(counts) {
+  if (!counts) return "no counts";
+  const parts = CHARACTER_ASSET_KINDS.filter((kind) => Number(counts[kind] ?? 0) > 0).map(
+    (kind) => `${counts[kind]} ${kind}`
+  );
+  return parts.length ? parts.join(", ") : "nothing generated yet";
+}
+
 /** The character body fields shared by create and update (image_paths already resolved). */
 function characterBody(args) {
   const body = {};
@@ -644,6 +720,19 @@ export function createServer(options = {}) {
   const mediaUrl = (storageUri) =>
     storageUri ? `${baseUrl}/media/${encodeURIComponent(storageUri)}` : null;
   const jobLink = (id) => `${appUrl}/#/jobs/${encodeURIComponent(id)}`;
+
+  /** `url` when it is this deployment's /media route (same origin), else null. */
+  function ownMediaUrl(url) {
+    if (typeof url !== "string" || !url) return null;
+    try {
+      const candidate = new URL(url);
+      const ours = new URL(baseUrl);
+      const isMedia = candidate.pathname.startsWith("/media/") && candidate.pathname.length > "/media/".length;
+      return candidate.origin === ours.origin && isMedia ? candidate.href : null;
+    } catch {
+      return null;
+    }
+  }
 
   function summarizeJob(job) {
     return {
@@ -1679,13 +1768,203 @@ export function createServer(options = {}) {
   tool(
     "adsoptimiser_get_character",
     "Get a character",
-    "Get one saved character with every reference image URL (and the job each came from), its description, style and default voice.",
+    "Get one saved character with every reference image URL (and the job each came from), its description, style and default voice, plus a summary of everything made with it: counts per kind, the latest items (with any kept speech audio) and the latest voice previews. Use adsoptimiser_list_character_assets for the full gallery, and its download_to to save files locally.",
     schemas.get_character,
     { readOnlyHint: true, openWorldHint: false },
     async ({ character_id }) => {
-      const character = await api.request("GET", `/api/v1/characters/${encodeURIComponent(character_id)}`);
+      const path = `/api/v1/characters/${encodeURIComponent(character_id)}`;
+      const character = await api.request("GET", path);
       const summary = summarizeCharacter(character);
-      return ok(describeCharacter(summary), summary);
+      // The hub summary is extra context: the character alone still answers,
+      // including on a deployment that predates the Characters hub.
+      const [assets, previews] = await Promise.all([
+        api.request("GET", `${path}/assets?limit=5`).catch(() => null),
+        api.request("GET", `${path}/voice-previews?limit=3`).catch(() => null),
+      ]);
+      const latestItems = (assets?.items ?? []).map((item) => summarizeAsset(item, jobLink));
+      const latestPreviews = (previews?.previews ?? []).map((preview) => ({
+        preview_id: preview.preview_id,
+        voice: preview.voice ?? null,
+        text: preview.text ?? null,
+        media_url: preview.media_url ?? null,
+        created_at: preview.created_at ?? null,
+      }));
+      // Only in this package: every audio URL in one list, so Claude can offer
+      // to save them: speech with list_character_assets download_to, previews
+      // with preview_voice save_to (a repeat is served from cache).
+      const audio = [
+        ...latestItems
+          .filter((item) => item.speech_url)
+          .map((item) => ({
+            source: "speech",
+            job_id: item.job_id,
+            kind: item.kind,
+            url: item.speech_url,
+            text: item.script,
+          })),
+        ...latestPreviews
+          .filter((p) => p.media_url)
+          .map((p) => ({ source: "voice_preview", preview_id: p.preview_id, voice: p.voice, url: p.media_url, text: p.text })),
+      ];
+      const structured = {
+        ...summary,
+        counts: assets?.counts ?? null,
+        latest_items: latestItems,
+        latest_voice_previews: latestPreviews,
+        audio,
+      };
+      const lines = [describeCharacter(summary)];
+      if (assets) {
+        lines.push(`Made with this character: ${describeCounts(assets.counts)}.`);
+        if (latestItems.length) lines.push("Latest:", ...latestItems.map(describeAsset));
+      }
+      if (latestPreviews.length) {
+        lines.push(
+          "Latest voice previews:",
+          ...latestPreviews.map((p) => `- ${p.media_url} "${String(p.text ?? "").slice(0, 80)}"`)
+        );
+      }
+      if (audio.length) {
+        lines.push(
+          "To save audio locally: kept speech with adsoptimiser_list_character_assets and download_to; a voice preview with adsoptimiser_preview_voice, the same voice and text, and save_to (repeats are served from cache and use no allowance)."
+        );
+      }
+      return ok(lines.join("\n"), structured);
+    }
+  );
+
+  /**
+   * Save the listed finished assets (media, then kept speech) into `folder`,
+   * at most MAX_CHARACTER_DOWNLOADS files. Only this deployment's /media URLs
+   * are fetched, and never with the token. One failure does not stop the rest.
+   */
+  async function downloadCharacterAssets(items, folder) {
+    const files = [];
+    for (const item of items) {
+      if (item.media_url) files.push({ item, url: item.media_url, speech: false });
+      if (item.speech_url) files.push({ item, url: item.speech_url, speech: true });
+    }
+    const saved = [];
+    const skipped = [];
+    const failed = [];
+    const notAttempted = [];
+    for (const file of files) {
+      const which = file.speech ? "speech" : "media";
+      if (saved.length + failed.length >= MAX_CHARACTER_DOWNLOADS) {
+        notAttempted.push({ job_id: file.item.job_id, file: which });
+        continue;
+      }
+      const url = ownMediaUrl(file.url);
+      if (!url) {
+        skipped.push({ job_id: file.item.job_id, file: which, url: file.url, reason: "not this deployment's media" });
+        continue;
+      }
+      const key = decodeURIComponent(new URL(url).pathname.slice("/media/".length));
+      try {
+        const { saved: result } = await downloadMedia(
+          url,
+          folder,
+          (contentType) =>
+            file.speech
+              ? downloadFileName(`${file.item.job_id}-speech`, file.item.script, ".mp3")
+              : downloadFileName(
+                  file.item.job_id,
+                  file.item.script ?? file.item.prompt,
+                  extensionFor({ storageUri: key, contentType, assetType: file.item.asset_type })
+                ),
+          { what: `The ${which} for job ${file.item.job_id}` }
+        );
+        saved.push({
+          job_id: file.item.job_id,
+          kind: file.item.kind ?? null,
+          file: which,
+          path: result.path,
+          bytes: result.bytes,
+          renamed: result.renamed,
+        });
+      } catch (err) {
+        failed.push({ job_id: file.item.job_id, file: which, reason: describeError(err, config) });
+      }
+    }
+    return { saved, skipped, failed, not_attempted: notAttempted };
+  }
+
+  tool(
+    "adsoptimiser_list_character_assets",
+    "List a character's assets",
+    `List everything made with a saved character, newest first: images, videos, talking clips, lip-syncs, voiceovers and captioned clips, with result URLs, the kept speech audio (speech_url) and the line spoken (script) where there is one. Filter by type and page with cursor. Only in this package: with download_to, the listed finished files (media and speech mp3s) are also saved to that local folder, at most ${MAX_CHARACTER_DOWNLOADS} per call, and existing files are never replaced.`,
+    schemas.list_character_assets,
+    // Not read-only: download_to writes local files.
+    { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    async ({ character_id, type, cursor, limit, download_to }) => {
+      // Refuse a bad folder before calling the API.
+      const folder = download_to !== undefined ? resolveOutputFolder(download_to, config.output) : null;
+      const path = `/api/v1/characters/${encodeURIComponent(character_id)}`;
+      const params = new URLSearchParams({ limit: String(limit ?? 10) });
+      if (type) params.set("type", type);
+      if (cursor) params.set("cursor", cursor);
+      let page;
+      try {
+        page = await api.request("GET", `${path}/assets?${params}`);
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 403 && err.code === "token_scope_denied") {
+          return fail(
+            "This Ads Optimiser deployment does not list character assets for API tokens yet. adsoptimiser_get_character still works, and the Characters page in the app shows the gallery."
+          );
+        }
+        if (err instanceof ApiError && err.status === 404) {
+          // A 404 is an unknown character, or a deployment without the hub.
+          const exists = await api.request("GET", path).then(
+            () => true,
+            () => false
+          );
+          if (exists) {
+            return fail(
+              "This Ads Optimiser deployment predates the Characters hub, so it cannot list a character's assets. adsoptimiser_get_character still works, and adsoptimiser_list_jobs lists recent jobs."
+            );
+          }
+        }
+        throw err;
+      }
+      const items = (page.items ?? []).map((item) => ({
+        ...summarizeAsset(item, jobLink),
+        prompt: item.prompt ?? null,
+      }));
+      const lines = [
+        `Character ${character_id}: ${describeCounts(page.counts)}.`,
+        items.length
+          ? `Showing ${items.length}${type ? ` ${type}` : ""} item(s):`
+          : `No ${type ? `${type} ` : ""}items${cursor ? " on this page" : ""}.`,
+        ...items.map(describeAsset),
+        ...(page.next_cursor ? [`More: call again with cursor ${page.next_cursor}`] : []),
+      ];
+      const structured = {
+        character_id,
+        items,
+        counts: page.counts ?? null,
+        next_cursor: page.next_cursor ?? null,
+      };
+      if (folder) {
+        const result = await downloadCharacterAssets(items, folder);
+        structured.downloads = result;
+        lines.push(
+          result.saved.length
+            ? `Saved ${result.saved.length} file(s) in ${folder}:`
+            : `Nothing saved in ${folder}.${result.skipped.length || result.failed.length ? "" : " No finished media or speech on this page."}`
+        );
+        for (const s of result.saved) {
+          lines.push(`- ${s.path}${s.renamed ? " (a file with that name already existed, so a numbered name was used)" : ""}`);
+        }
+        for (const s of result.skipped) lines.push(`- not saved: ${s.job_id} ${s.file} (${s.reason})`);
+        for (const f of result.failed) lines.push(`- failed: ${f.job_id} ${f.file}: ${f.reason}`);
+        if (result.not_attempted.length) {
+          const jobs = [...new Set(result.not_attempted.map((n) => n.job_id))];
+          lines.push(
+            `${result.not_attempted.length} more file(s) not saved (at most ${MAX_CHARACTER_DOWNLOADS} per call): ${jobs.join(", ")}. To save every file, list smaller pages (limit ${Math.floor(MAX_CHARACTER_DOWNLOADS / 2)} always fits) and follow next_cursor.`
+          );
+        }
+      }
+      return ok(lines.join("\n"), structured);
     }
   );
 
@@ -1766,28 +2045,21 @@ export function createServer(options = {}) {
    */
   function previewDownloadUrl(preview) {
     if (typeof preview.storage_uri === "string" && preview.storage_uri) return mediaUrl(preview.storage_uri);
-    if (typeof preview.media_url !== "string") return null;
-    try {
-      const candidate = new URL(preview.media_url);
-      const ours = new URL(baseUrl);
-      return candidate.origin === ours.origin && candidate.pathname.startsWith("/media/") ? candidate.href : null;
-    } catch {
-      return null;
-    }
+    return ownMediaUrl(preview.media_url);
   }
 
   tool(
     "adsoptimiser_preview_voice",
     "Preview a voice",
-    "Synthesise a short sample (at most 300 characters) in a voice profile and return a playable audio URL, e.g. to audition an OpenAI voice with instructions before saving it to a character. With save_to, the mp3 is also saved to that local folder so the user can play it. Creates no job and uses no plan allowance; limited to 10 previews a minute, and repeats of the same voice and text are served from cache.",
+    "Synthesise a short sample (at most 300 characters) in a voice profile and return a playable audio URL, e.g. to audition an OpenAI voice with instructions before saving it to a character. Pass character_id to file it in that character's voice preview history (shown on its Characters page). With save_to, the mp3 is also saved to that local folder so the user can play it. Creates no job and uses no plan allowance; limited to 10 previews a minute, and repeats of the same voice and text are served from cache.",
     schemas.preview_voice,
     // Not read-only: save_to writes a local file.
     { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-    async ({ voice, text, save_to }) => {
+    async ({ voice, text, character_id, save_to }) => {
       // Refuse a bad folder before anything is synthesised.
       const folder = save_to !== undefined ? resolveOutputFolder(save_to, config.output) : null;
       const preview = await api.request("POST", "/api/v1/voices/preview", {
-        json: { voice, ...(text ? { text } : {}) },
+        json: { voice, ...(text ? { text } : {}), ...(character_id ? { character_id } : {}) },
       });
       const label = voice.provider === "openai" ? `OpenAI ${voice.voice}` : `xAI ${voice.voice_id}`;
       const structured = {
@@ -1796,6 +2068,8 @@ export function createServer(options = {}) {
         text: preview.text ?? null,
         cached: preview.cached === true,
         voice: preview.voice ?? voice,
+        preview_id: preview.preview_id ?? null,
+        character_id: preview.character_id ?? character_id ?? null,
       };
       const lines = [`Preview of ${label}: ${preview.media_url}`, `Said: "${preview.text ?? ""}"`];
       if (folder) {
