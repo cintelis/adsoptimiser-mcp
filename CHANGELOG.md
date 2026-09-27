@@ -2,6 +2,23 @@
 
 All notable changes to `@cintelisai/adsoptimiser-mcp` are recorded here. Versions follow [semantic versioning](https://semver.org/).
 
+## 0.4.0 (2026-09-27)
+
+### Added
+
+- `adsoptimiser_lip_sync`, the same as the hosted connector's `lip_sync`: make the person in a finished clip say a new line in a designed voice (an OpenAI voice with instructions, or an xAI preset; by default the character's own voice), with the mouth re-animated to match by Kling LipSync. Takes `video_job_id` or `video_url`, `script` (at most 900 characters), and optionally `voice`, `character_id` and `model` (`kling-lipsync`, the only model). It is asynchronous: it returns the job id and estimated provider cost at once, so follow it with `adsoptimiser_get_job`. Each lip-sync uses one video generation from the plan allowance and counts toward the daily video quota. Only in this package: `video_path`, a local .mp4 or .mov clip (at most 100 MB) that is checked and uploaded for you. Pass exactly one of `video_job_id`, `video_url` or `video_path`.
+- Clear messages for the lip-sync refusals: lip-sync not configured, a source clip Kling cannot use (it needs 2 to 10 seconds at 720p or 1080p), speech that does not fit the clip, speech synthesis failures, a source video that is not ready yet, and a deployment that does not yet allow lip-sync for API tokens.
+- Job summaries label lip-sync jobs ("lip-sync video", model "Kling LipSync") and show the voice used, where it came from, the length of the speech and the source job.
+- The pipeline node catalogue's local descriptions and graph rules cover the `lip_sync` node (inputs video and script; params script, voice, voice_id and model) and the `character-lip-sync` template, "Character talking clip (designed voice)". A graph whose `lip_sync` node has no script and nothing wired into its script input needs a run prompt.
+
+### Changed
+
+- The graph rules now point talking clips in an OpenAI voice to `lip_sync` instead of `strip_audio` then `add_voiceover`.
+
+### Fixed
+
+- A file of the wrong kind now reads "is an image, but a video is needed" instead of "is a image, but an video is needed".
+
 ## 0.3.0 (2026-09-27)
 
 ### Added

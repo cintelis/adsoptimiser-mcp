@@ -101,7 +101,8 @@ export async function inspectLocalMedia(rawPath, { base, expected = "any" }) {
     );
   }
   if (expected !== "any" && kind !== expected) {
-    throw new LocalFileError(`${name} is a ${kind}, but an ${expected} is needed here.`);
+    const article = (k) => (k === "image" ? "an image" : "a video");
+    throw new LocalFileError(`${name} is ${article(kind)}, but ${article(expected)} is needed here.`);
   }
   if (info.size === 0) throw new LocalFileError(`${name} is empty.`);
   const max = kind === "image" ? MAX_IMAGE_BYTES : MAX_VIDEO_BYTES;

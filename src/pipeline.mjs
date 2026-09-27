@@ -40,6 +40,8 @@ export const OPENAI_VOICES = [
   "marin",
   "cedar",
 ];
+/** The only lip-sync model enabled on the API. */
+export const LIP_SYNC_MODELS = ["kling-lipsync"];
 const VOICE_PARAM = {
   type: "object",
   one_of: [
@@ -151,6 +153,30 @@ export const PARAM_SPECS = {
         "A saved character id (adsoptimiser_list_characters). Template runs may leave it empty and pass character_id to adsoptimiser_run_pipeline.",
     },
   },
+  lip_sync: {
+    script: {
+      type: "string",
+      max_length: 900,
+      description:
+        "The exact words the person says. Omit to use a wired text node or the run prompt. At most 60 seconds of speech, and it must fit the clip (about 15 characters a second).",
+    },
+    voice: {
+      ...VOICE_PARAM,
+      description:
+        "Voice profile the line is spoken in (see adsoptimiser_list_voices). Wins over voice_id and over the character's voice. Omit both to use the voice of the character the video was made from, else eve. OpenAI voices need the deployment's OpenAI key.",
+    },
+    voice_id: {
+      type: "string",
+      enum: XAI_PRESET_VOICES,
+      description: "xAI preset voice (shorthand for voice: { provider: xai }). Omitted: the character's voice, else eve.",
+    },
+    model: {
+      type: "string",
+      enum: LIP_SYNC_MODELS,
+      default: "kling-lipsync",
+      description: "Lip-sync model. kling-lipsync: 2 to 10 second clips at 720p or 1080p, about US$0.014 per 5 seconds.",
+    },
+  },
   add_captions: {
     captions: {
       type: "string",
@@ -184,11 +210,13 @@ export const GRAPH_RULES = [
   "Each input takes at most its max_connections edges (1 unless stated). One output may feed many inputs (fan-out).",
   "Required inputs other than prompt must be connected.",
   "A prompt input with nothing wired into it uses the run prompt given to adsoptimiser_run_pipeline. When every prompt input is fed by a text or refine_prompt node (or a voice node has a script), no run prompt is needed. Wire one text node to several prompt inputs to share a prompt, or use separate text nodes to give branches different prompts.",
-  "Each generate_image, generate_video, image_to_video, extend_video and voiced_video node is one generation from the plan allowance (video nodes also count toward the daily video quota); add_voiceover, strip_audio and add_captions are post-processing creative jobs, never generations; text, input_image, character and refine_prompt are free.",
+  "Each generate_image, generate_video, image_to_video, extend_video, voiced_video and lip_sync node is one generation from the plan allowance (video nodes, lip_sync included, also count toward the daily video quota); add_voiceover, strip_audio and add_captions are post-processing creative jobs, never generations; text, input_image, character and refine_prompt are free.",
   "A character node (character_id from adsoptimiser_list_characters) feeds a generate_image or voiced_video refs input as ONE connection and fills the free reference slots with its images; it cannot feed image_to_video's image input. Its description is added to that node's prompt and voiced_video uses its default voice when voice_id is omitted.",
-  "add_captions burns text into a video: its captions param, else a text node wired into its text input, else the script of the voiced_video (or add_voiceover) it captions.",
+  "add_captions burns text into a video: its captions param, else a text node wired into its text input, else the script of the voiced_video (or add_voiceover or lip_sync) it captions.",
   'add_voiceover voice: its voice param ({"provider":"xai","voice_id"} or {"provider":"openai","voice","instructions"?}, see adsoptimiser_list_voices) or voice_id wins, else the voice of the character the video was made from (a character wired upstream of that video), else eve. OpenAI narration needs a script of at most 4096 characters.',
-  "voiced_video (and adsoptimiser_generate_video with a script) only speaks xAI presets: an OpenAI character voice falls back to the character's xai_voice_id, else eve, and the job says so. For an OpenAI voice on a talking clip, strip_audio then add_voiceover.",
+  "voiced_video (and adsoptimiser_generate_video with a script) only speaks xAI presets: an OpenAI character voice falls back to the character's xai_voice_id, else eve, and the job says so. For a talking clip in an OpenAI (designed) voice with matching mouth movement, use lip_sync.",
+  'lip_sync re-animates the mouth in its wired video so the person speaks a line in a designed voice. Script: its script param, else a text node wired into its "script" input, else the run prompt. Voice: its voice ({"provider":"openai","voice","instructions"?} or xai) or voice_id, else the voice of the character upstream of the video, else eve. kling-lipsync (the only model; about US$0.014 per 5s) needs the generating node to set resolution 720p or 1080p and duration 2 to 10; the line must fit the clip (about 15 characters a second, so about 20 words for an 8s clip). The output keeps the new audio, so wire add_captions straight after it (captions default to the script); no strip_audio needed.',
+  "Template character-lip-sync, \"Character talking clip (designed voice)\" (pass character_id; the run prompt is the exact line spoken, about 20 words): refine_prompt (scene from the line) > character > generate_image > image_to_video (8s, 720p) > lip_sync > add_captions. About US$0.72 per run in provider costs.",
   "input_image needs params.image_url: an https URL, or with this local server an absolute local file path, which is uploaded for you.",
   "position is optional editor layout; leave it out.",
 ];
@@ -362,6 +390,12 @@ export function graphNeedsRunPrompt(graph) {
   const nodes = Array.isArray(graph?.nodes) ? graph.nodes : [];
   const edges = Array.isArray(graph?.edges) ? graph.edges : [];
   return nodes.some((node) => {
+    // lip_sync speaks the run prompt when it has no script and none is wired.
+    if (node?.type === "lip_sync") {
+      const script = node.params?.script;
+      if (typeof script === "string" && script.trim()) return false;
+      return !edges.some((e) => e?.to?.node === node.id && e?.to?.input === "script");
+    }
     if (!PROMPTED_TYPES.has(node?.type)) return false;
     const script = node.params?.script;
     if ((node.type === "add_voiceover" || node.type === "voiced_video") && typeof script === "string" && script.trim()) {
