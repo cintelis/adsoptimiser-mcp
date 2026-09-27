@@ -14,6 +14,10 @@
 // Deliberately dependency-light: the MCP SDK, zod (its schema language), and
 // global fetch. State is one JSON file per host in the home directory holding
 // the token and, briefly, a pending device authorisation.
+//
+// This file is the entry point for the bundle: scripts/build.mjs turns it into
+// dist/server.mjs (the published bin) with the SDK and zod inside, so `npx`
+// installs one package and starts at once. Run it directly for development.
 
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createServer } from "./src/server.mjs";
