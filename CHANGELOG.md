@@ -2,6 +2,21 @@
 
 All notable changes to `@cintelisai/adsoptimiser-mcp` are recorded here. Versions follow [semantic versioning](https://semver.org/).
 
+## 0.10.0 (2026-09-28)
+
+### Added
+
+- **Text placement on overlays.** Each cue of `adsoptimiser_add_overlays` (and of a pipeline's `add_captions` `cues`) takes optional `y`, from 0.05 to 0.95, the vertical centre of the text as a fraction of the frame height (0 is the top), which overrides `position`; `size`, `small`, `medium` or `large` (default medium for a caption, large for a card); and `max_width`, from 0.4 to 1.0, the text block's width as a fraction of the frame width. A cue's text may hold explicit line breaks (`\n`), at most 3 lines. Auto captions take `captions_y` (0.05 to 0.95, overriding `captions_position`) and `captions_size` (`small`, `medium` or `large`).
+- The `adsoptimiser_add_overlays` description now says it works on any finished video, with no need to regenerate the video or run a pipeline to caption it, advises keeping cards out of the upper third of a 9:16 talking clip, where the face is (for example `y: 0.62`, or `position: "center"`), and suggests `\n` for two short lines. The server instructions say the same.
+- **The `input_video` pipeline node ("Your video (library)").** No inputs, one `video` output, free and creates no job. It takes exactly one of `video_job_id` (a ready video job in the workspace) or `video_url` (the workspace's own `/media` URL) and can feed `add_captions`, `add_voiceover`, `strip_audio`, `lip_sync` and `extend_video`. The local catalogue descriptions and graph rules cover it, and the new "Re-caption a video (your video -> captions)" template.
+- Only in this package: a local .mp4 or .mov for an `input_video` node, as `params.video_path` or as a `video_url` that is not a URL, is checked and uploaded (`POST /api/v1/jobs/source-media`, source type video) and replaced with its hosted URL before the graph is validated, saved or run, as local images in `input_image` nodes already are. Each file is uploaded once per session, and a node that mixes a local file with another source is refused.
+- `adsoptimiser_list_pipelines` marks templates that start from your video (`needs_video`, from the API or from an `input_video` step). `adsoptimiser_run_pipeline` takes `video_job_id`, `video_url` or a local `video_path` for a template or saved pipeline, which fills every empty `input_video` step, for example `template_id: "video-recaption"`.
+
+### Changed
+
+- Only in this package: every placement value (`y`, `size`, `max_width`, the line count, `captions_y` and `captions_size`) is checked on your machine before anything is uploaded, sent or charged, with every problem listed at once. The same cue checks now run on a graph's `add_captions` cues before a graph is validated, saved or run.
+- On a deployment that predates these features, the reply says what it doesn't support yet instead of a bare refusal: "this Ads Optimiser deployment doesn't support cue placement (y, size and max_width) yet", caption placement (`captions_y` and `captions_size`) or line breaks in cues, when a 400 names a field this request used as unknown; and the input_video node, when graph validation or a save reports it as an unknown node type (with a pointer to `adsoptimiser_add_overlays`).
+
 ## 0.9.0 (2026-09-28)
 
 ### Added

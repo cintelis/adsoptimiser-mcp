@@ -38,15 +38,29 @@ import {
   EXAMPLE_GRAPH,
   GRAPH_RULES,
   LIP_SYNC_MODELS,
+  MAX_CUE_LINES,
   MAX_CUE_TEXT_CHARS,
   MAX_GRAPH_NODES,
   MAX_OVERLAY_CUES,
   OPENAI_VOICES,
+  OVERLAY_MAX_WIDTH_MAX,
+  OVERLAY_MAX_WIDTH_MIN,
   OVERLAY_POSITIONS,
+  OVERLAY_SIZES,
   OVERLAY_STYLES,
+  OVERLAY_Y_MAX,
+  OVERLAY_Y_MIN,
+  captionPlacementProblems,
   compactNodeType,
+  cueForApi,
+  cueListProblems,
   describeNodeType,
+  graphCueProblems,
   localImageRefs,
+  localVideoRefs,
+  placementFeaturesUsed,
+  refusedPlacementFeature,
+  unsupportedGraphFeatures,
   needsRunPrompt,
   normaliseGraph,
   shapeErrors,
@@ -115,47 +129,19 @@ export function overlayRequestProblems(args = {}) {
   }
   const cues = args.cues;
   if (cues !== undefined && !Array.isArray(cues)) {
-    problems.push("cues must be a list of { text, start, end, position?, style? }.");
+    problems.push("cues must be a list of { text, start, end, position?, style?, y?, size?, max_width? }.");
   }
   const cueList = Array.isArray(cues) ? cues : [];
   if (cueList.length === 0 && args.auto_captions !== true) {
     problems.push("Give at least one cue in cues, or set auto_captions to true (or both).");
   }
-  if (cueList.length > MAX_OVERLAY_CUES) {
-    problems.push(`At most ${MAX_OVERLAY_CUES} cues in one request (got ${cueList.length}).`);
-  }
-  cueList.forEach((cue, i) => {
-    const at = `cues[${i}]`;
-    if (!cue || typeof cue !== "object" || Array.isArray(cue)) {
-      problems.push(`${at} must be an object { text, start, end, position?, style? }.`);
-      return;
-    }
-    const text = typeof cue.text === "string" ? cue.text.trim() : null;
-    if (text === null) problems.push(`${at}.text is missing: give the words to show.`);
-    else if (!text) problems.push(`${at}.text is empty.`);
-    else if (text.length > MAX_CUE_TEXT_CHARS) {
-      problems.push(`${at}.text is ${text.length} characters; at most ${MAX_CUE_TEXT_CHARS}.`);
-    }
-    const startOk = typeof cue.start === "number" && Number.isFinite(cue.start);
-    const endOk = typeof cue.end === "number" && Number.isFinite(cue.end);
-    if (!startOk) problems.push(`${at}.start must be a number of seconds.`);
-    else if (cue.start < 0) problems.push(`${at}.start is ${cue.start}; it must be 0 or more.`);
-    if (!endOk) problems.push(`${at}.end must be a number of seconds.`);
-    if (startOk && endOk && cue.end <= cue.start) {
-      problems.push(`${at}.end (${cue.end}) must be after start (${cue.start}).`);
-    }
-    if (cue.position !== undefined && !OVERLAY_POSITIONS.includes(cue.position)) {
-      problems.push(`${at}.position must be ${OVERLAY_POSITIONS.join(", ")}, not ${JSON.stringify(cue.position)}.`);
-    }
-    if (cue.style !== undefined && !OVERLAY_STYLES.includes(cue.style)) {
-      problems.push(`${at}.style must be ${OVERLAY_STYLES.join(" or ")}, not ${JSON.stringify(cue.style)}.`);
-    }
-  });
+  problems.push(...cueListProblems(cueList));
   if (args.captions_position !== undefined && !OVERLAY_POSITIONS.includes(args.captions_position)) {
     problems.push(
       `captions_position must be ${OVERLAY_POSITIONS.join(", ")}, not ${JSON.stringify(args.captions_position)}.`
     );
   }
+  problems.push(...captionPlacementProblems(args));
   return problems;
 }
 
@@ -370,7 +356,7 @@ const INSTRUCTIONS = [
   "Every generation uses the workspace's monthly plan allowance, so confirm before generating many at once.",
   "Local files: pass absolute paths. Use adsoptimiser_download_job to save finished media to disk.",
   "For a consistent AI person (influencer, brand ambassador): generate a character sheet, save the best shots with adsoptimiser_create_character (local files via image_paths), then pass character_id to adsoptimiser_generate_image, adsoptimiser_generate_video or adsoptimiser_run_pipeline. Audition voices with adsoptimiser_preview_voice. adsoptimiser_get_character summarises what was made with a character; adsoptimiser_list_character_assets lists it all and saves files locally with download_to. For a talking clip in a designed (OpenAI) voice, lip-sync a finished clip with adsoptimiser_lip_sync, or run the character-lip-sync template.",
-  "To put text on a finished video (title cards timed to spoken moments, or captions timed to the speech with auto_captions), use adsoptimiser_add_overlays.",
+  "To put text on any finished video (title cards timed to spoken moments, or captions timed to the speech with auto_captions), use adsoptimiser_add_overlays: it works on any existing video, with no need to regenerate it or run a pipeline.",
   `To build a pipeline: call adsoptimiser_get_pipeline_nodes first, use only the node types it lists, keep to ${MAX_GRAPH_NODES} nodes, and check the graph with adsoptimiser_validate_pipeline before saving or running it.`,
 ].join(" ");
 
@@ -492,7 +478,7 @@ const pipelineGraph = z
             .record(z.string(), z.unknown())
             .optional()
             .describe(
-              "Params for this node type, from adsoptimiser_get_pipeline_nodes. input_image takes image_url: an https URL or an absolute local file path (uploaded for you)."
+              "Params for this node type, from adsoptimiser_get_pipeline_nodes. input_image takes image_url: an https URL or an absolute local file path (uploaded for you). input_video takes exactly one of video_job_id, video_url (the workspace's /media URL) or video_path (an absolute local .mp4/.mov, uploaded for you)."
             ),
           position: z
             .object({ x: z.number(), y: z.number() })
@@ -680,7 +666,11 @@ export const schemas = {
     cues: z
       .array(
         z.object({
-          text: z.string().describe(`The words to show, 1 to ${MAX_CUE_TEXT_CHARS} characters.`),
+          text: z
+            .string()
+            .describe(
+              `The words to show, 1 to ${MAX_CUE_TEXT_CHARS} characters. Use \\n for a line break (at most ${MAX_CUE_LINES} lines), for example two short lines.`
+            ),
           start: z.number().describe("When it appears: seconds from the start of the video, 0 or more."),
           end: z.number().describe("When it goes: seconds from the start, after start."),
           position: z
@@ -691,11 +681,27 @@ export const schemas = {
             .string()
             .optional()
             .describe("caption (a subtitle line) or card (a bold title card)."),
+          y: z
+            .number()
+            .optional()
+            .describe(
+              `Vertical centre of the text as a fraction of frame height, ${OVERLAY_Y_MIN} to ${OVERLAY_Y_MAX} (0 is the top); overrides position. In a 9:16 talking clip keep cards below the face, for example 0.62.`
+            ),
+          size: z
+            .string()
+            .optional()
+            .describe(`Text size: ${OVERLAY_SIZES.join(", ")}. Default medium for a caption, large for a card.`),
+          max_width: z
+            .number()
+            .optional()
+            .describe(
+              `Width of the text block as a fraction of frame width, ${OVERLAY_MAX_WIDTH_MIN} to ${OVERLAY_MAX_WIDTH_MAX}.`
+            ),
         })
       )
       .optional()
       .describe(
-        `Timed text, at most ${MAX_OVERLAY_CUES} cues: [{ text, start, end, position?, style? }], each shown from start to end (seconds). position is ${OVERLAY_POSITIONS.join(", ")}; style is ${OVERLAY_STYLES.join(" or ")}.`
+        `Timed text, at most ${MAX_OVERLAY_CUES} cues: [{ text, start, end, position?, style?, y?, size?, max_width? }], each shown from start to end (seconds). position is ${OVERLAY_POSITIONS.join(", ")}; style is ${OVERLAY_STYLES.join(" or ")}; y (${OVERLAY_Y_MIN} to ${OVERLAY_Y_MAX}) overrides position; size is ${OVERLAY_SIZES.join(", ")}; max_width is ${OVERLAY_MAX_WIDTH_MIN} to ${OVERLAY_MAX_WIDTH_MAX}. text may hold \\n line breaks, at most ${MAX_CUE_LINES} lines.`
       ),
     auto_captions: z
       .boolean()
@@ -707,6 +713,16 @@ export const schemas = {
       .string()
       .optional()
       .describe(`Where auto captions sit: ${OVERLAY_POSITIONS.join(", ")}. Default bottom.`),
+    captions_y: z
+      .number()
+      .optional()
+      .describe(
+        `Vertical centre of the auto captions as a fraction of frame height, ${OVERLAY_Y_MIN} to ${OVERLAY_Y_MAX} (0 is the top); overrides captions_position.`
+      ),
+    captions_size: z
+      .string()
+      .optional()
+      .describe(`Size of the auto captions: ${OVERLAY_SIZES.join(", ")}. Default medium.`),
     script: z
       .string()
       .trim()
@@ -754,6 +770,21 @@ export const schemas = {
       .describe(
         "Fills every character step that has no character chosen. Required for templates marked needs_character (character-talking-clip, character-scene, character-lip-sync)."
       ),
+    video_job_id: jobId
+      .optional()
+      .describe(
+        "For a template or saved pipeline marked needs_video: a ready video job in this workspace that fills every empty input_video step. Give at most one of video_job_id, video_url or video_path."
+      ),
+    video_url: z
+      .string()
+      .max(2048)
+      .optional()
+      .describe("The same as video_job_id, as the workspace's own /media URL."),
+    video_path: z
+      .string()
+      .max(1024)
+      .optional()
+      .describe("The same as video_job_id, as a local .mp4 or .mov that is checked and uploaded for you first."),
   }),
   get_pipeline_run: z.object({ run_id: jobId }),
   get_pipeline_nodes: z.object({}),
@@ -1326,21 +1357,40 @@ export function createServer(options = {}) {
       }
       if (err instanceof ApiError && err.status === 400 && Array.isArray(err.body?.errors)) {
         const errors = shapeErrors(err.body.errors);
+        const unsupported = unsupportedGraphFeatures(errors, args?.graph);
         return fail(
-          [`The pipeline graph was rejected: ${err.message}`, ...errors.map((e) => `- ${e.message}`)].join("\n"),
-          { valid: false, errors }
+          [
+            ...unsupportedLines(unsupported),
+            `The pipeline graph was rejected: ${err.message}`,
+            ...errors.map((e) => `- ${e.message}`),
+          ].join("\n"),
+          { valid: false, errors, ...(unsupported.length ? { unsupported } : {}) }
         );
       }
       throw err;
     }
   };
 
+  // Uploaded local videos, keyed like uploadedImages.
+  const uploadedVideos = new Map();
+
   /**
-   * Replace local file paths in input_image nodes with hosted URLs. Every file
-   * is checked before any is uploaded. Returns the rewritten copy of the graph.
+   * Replace local file paths in input_image and input_video nodes with hosted
+   * URLs. The add_captions cues and every file are checked before any file is
+   * uploaded. Returns the rewritten copy of the graph.
    */
   async function resolveGraphFiles(rawGraph) {
     const graph = normaliseGraph(rawGraph);
+    const cueProblems = graphCueProblems(graph);
+    if (cueProblems.length) {
+      throw new LocalFileError(
+        [
+          `Not sent: ${cueProblems.length === 1 ? "one problem" : `${cueProblems.length} problems`} with the add_captions cues.`,
+          ...cueProblems.map((p) => `- ${p}`),
+          "Nothing was sent or charged.",
+        ].join("\n")
+      );
+    }
     const refs = localImageRefs(graph);
     for (const ref of refs) {
       if (ref.conflict) {
@@ -1349,6 +1399,21 @@ export function createServer(options = {}) {
         );
       }
     }
+    const videoRefs = localVideoRefs(graph);
+    for (const ref of videoRefs) {
+      if (ref.conflict) {
+        throw new LocalFileError(
+          `input_video node "${ref.node.id}" has both ${ref.conflict}; give exactly one of video_job_id, video_url or video_path.`
+        );
+      }
+    }
+    // Check every local video before uploading anything.
+    const videoFiles = [];
+    for (const ref of videoRefs) {
+      const file = await inspectLocalMedia(ref.path, { base: config.cwd, expected: "video" });
+      const { mtimeMs } = await stat(file.path);
+      videoFiles.push({ file, key: `${file.path}|${file.size}|${mtimeMs}` });
+    }
     const uploaded = await uploadLocalImages(refs.map((ref) => ref.path));
     const uploads = refs.map((ref, i) => {
       const params = { ...(ref.node.params ?? {}), image_url: uploaded[i].url };
@@ -1356,6 +1421,18 @@ export function createServer(options = {}) {
       ref.node.params = params;
       return { node_id: ref.node.id, path: uploaded[i].path, image_url: uploaded[i].url };
     });
+    for (const [i, ref] of videoRefs.entries()) {
+      const { file, key } = videoFiles[i];
+      let url = uploadedVideos.get(key);
+      if (!url) {
+        url = (await uploadLocal(file)).source_url;
+        uploadedVideos.set(key, url);
+      }
+      const params = { ...(ref.node.params ?? {}), video_url: url };
+      delete params.video_path;
+      ref.node.params = params;
+      uploads.push({ node_id: ref.node.id, path: file.path, video_url: url });
+    }
     return { graph, uploads };
   }
 
@@ -1374,7 +1451,26 @@ export function createServer(options = {}) {
           ? graph.nodes.length
           : 0,
       needs_run_prompt: needsRunPrompt(result, graph),
+      ...unsupportedField(result.errors, graph),
     };
+  }
+
+  /** { unsupported: [...] } when an older API's graph errors name a feature it lacks. */
+  function unsupportedField(errors, graph) {
+    const unsupported = unsupportedGraphFeatures(shapeErrors(errors), graph);
+    return unsupported.length ? { unsupported } : {};
+  }
+
+  /** "This Ads Optimiser deployment doesn't support X yet." lines, one per feature. */
+  function unsupportedLines(unsupported = []) {
+    return unsupported.map(
+      (feature) =>
+        `This Ads Optimiser deployment doesn't support ${feature} yet.${
+          /input_video/.test(feature)
+            ? " To caption or re-caption a finished video, use adsoptimiser_add_overlays instead."
+            : ""
+        }`
+    );
   }
 
   const usd = (value) => (typeof value === "number" ? `US$${value.toFixed(2)}` : "unknown");
@@ -1382,6 +1478,7 @@ export function createServer(options = {}) {
   function describeValidation(v) {
     if (!v.valid) {
       return [
+        ...unsupportedLines(v.unsupported),
         `The graph is not valid (${v.errors.length} problem${v.errors.length === 1 ? "" : "s"}):`,
         ...v.errors.map((e) => `- ${e.message}`),
         "Fix these using the node catalogue from adsoptimiser_get_pipeline_nodes, then validate again.",
@@ -1395,11 +1492,24 @@ export function createServer(options = {}) {
   }
 
   function describeUploads(uploads) {
-    return uploads.length
-      ? `\nUploaded ${uploads.length} local image${uploads.length === 1 ? "" : "s"} for input_image nodes (${uploads
-          .map((u) => u.node_id)
-          .join(", ")}).`
-      : "";
+    const images = uploads.filter((u) => u.image_url);
+    const videos = uploads.filter((u) => u.video_url);
+    return [
+      ...(images.length
+        ? [
+            `\nUploaded ${images.length} local image${images.length === 1 ? "" : "s"} for input_image nodes (${images
+              .map((u) => u.node_id)
+              .join(", ")}).`,
+          ]
+        : []),
+      ...(videos.length
+        ? [
+            `\nUploaded ${videos.length} local video${videos.length === 1 ? "" : "s"} for input_video nodes (${videos
+              .map((u) => u.node_id)
+              .join(", ")}).`,
+          ]
+        : []),
+    ].join("");
   }
 
   // -------------------------------------------------------------------------
@@ -1864,6 +1974,15 @@ export function createServer(options = {}) {
       }
       return `Not found: ${msg}. Check video_job_id with adsoptimiser_list_jobs. Nothing was charged.`;
     }
+    if (err.status === 400) {
+      const feature = refusedPlacementFeature(
+        [msg, ...listedProblems(err)].join("\n"),
+        placementFeaturesUsed(args.cues, args)
+      );
+      if (feature) {
+        return `This Ads Optimiser deployment doesn't support ${feature} yet (the API refused it: ${msg}). Nothing was charged. Leave those out, place text with position (top, center or bottom) and keep each cue to one line, then try again.`;
+      }
+    }
     if (err.status === 400 && err.code === "invalid_cues") {
       const problems = listedProblems(err);
       return [`The cues were refused: ${msg}.`, ...problems.map((p) => `- ${p}`), "Fix them and try again. Nothing was charged."].join("\n");
@@ -1890,7 +2009,7 @@ export function createServer(options = {}) {
   tool(
     "adsoptimiser_add_overlays",
     "Add text overlays to a video",
-    `Burn timed text into a finished video: title cards or caption lines shown at set times (cues), and/or captions timed to the speech (auto_captions). The source is a finished video job, an https URL, or a local .mp4/.mov (video_path, max 120 MB, uploaded for you); pass exactly one. Each cue is { text (1 to ${MAX_CUE_TEXT_CHARS} characters), start, end (seconds from the start, 0 <= start < end), position? (${OVERLAY_POSITIONS.join(", ")}), style? (caption or card) }, at most ${MAX_OVERLAY_CUES}. Example, grade cards timed to spoken moments: the presenter says "maths, an A" at about 2 seconds and "science, a B plus" at about 5, so cues [{ "text": "Maths: A", "start": 2, "end": 4.5, "style": "card", "position": "center" }, { "text": "Science: B+", "start": 5, "end": 7.5, "style": "card", "position": "center" }]. Time cards from what you know of the clip; speech runs about 15 characters a second. Use auto_captions when the video has speech and every word should be captioned as it is said: the server transcribes it (whisper-1, about US$0.006 per minute) and adds word-timed caption chunks (captions_position, default bottom). Pass script when you know the words (for example the line given to adsoptimiser_lip_sync or adsoptimiser_generate_video): it corrects the transcript's spellings of names, brands and numbers. Cues and auto_captions combine. Everything is checked on this machine first, so a bad request fails before anything is sent or charged. Rendering counts as one creative job, not a generation. Returns a job id at once; follow it with adsoptimiser_get_job.`,
+    `Burn timed text into ANY finished video: title cards or caption lines shown at set times (cues), and/or captions timed to the speech (auto_captions). It works on any video you already have (a finished job, a pipeline's output, an upload): there is no need to regenerate the video or run a pipeline to caption or re-caption it. The source is a finished video job, an https URL, or a local .mp4/.mov (video_path, max 120 MB, uploaded for you); pass exactly one. Each cue is { text (1 to ${MAX_CUE_TEXT_CHARS} characters), start, end (seconds from the start, 0 <= start < end), position? (${OVERLAY_POSITIONS.join(", ")}), style? (caption or card), y?, size?, max_width? }, at most ${MAX_OVERLAY_CUES}. Placement: y (${OVERLAY_Y_MIN} to ${OVERLAY_Y_MAX}) is the vertical centre of the text as a fraction of frame height (0 is the top) and overrides position; size is ${OVERLAY_SIZES.join(", ")} (default medium for a caption, large for a card); max_width (${OVERLAY_MAX_WIDTH_MIN} to ${OVERLAY_MAX_WIDTH_MAX}) is the text block's width as a fraction of frame width. In 9:16 talking clips keep cards out of the upper third, where the face is: use y 0.62 or position "center". For two short lines, put \\n in the text (at most ${MAX_CUE_LINES} lines). Example, grade cards timed to spoken moments: the presenter says "maths, an A" at about 2 seconds and "science, a B plus" at about 5, so cues [{ "text": "Maths: A", "start": 2, "end": 4.5, "style": "card", "y": 0.62 }, { "text": "Science\\nB+", "start": 5, "end": 7.5, "style": "card", "position": "center", "size": "large" }]. Time cards from what you know of the clip; speech runs about 15 characters a second. Use auto_captions when the video has speech and every word should be captioned as it is said: the server transcribes it (whisper-1, about US$0.006 per minute) and adds word-timed caption chunks (captions_position, default bottom, or captions_y; captions_size small, medium or large). Pass script when you know the words (for example the line given to adsoptimiser_lip_sync or adsoptimiser_generate_video): it corrects the transcript's spellings of names, brands and numbers. Cues and auto_captions combine. Everything is checked on this machine first, so a bad request fails before anything is sent or charged. Rendering counts as one creative job, not a generation. Returns a job id at once; follow it with adsoptimiser_get_job.`,
     schemas.add_overlays,
     { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     async (args) => {
@@ -1914,18 +2033,14 @@ export function createServer(options = {}) {
           videoUrl = (await uploadLocal(file)).source_url;
           upload = { path: file.path, video_url: videoUrl };
         }
-        const cues = (args.cues ?? []).map((cue) => ({
-          text: cue.text.trim(),
-          start: cue.start,
-          end: cue.end,
-          ...(cue.position !== undefined ? { position: cue.position } : {}),
-          ...(cue.style !== undefined ? { style: cue.style } : {}),
-        }));
+        const cues = (args.cues ?? []).map(cueForApi);
         const body = {
           ...(args.video_job_id ? { video_job_id: args.video_job_id } : { video_url: videoUrl }),
           ...(cues.length ? { cues } : {}),
           ...(args.auto_captions !== undefined ? { auto_captions: args.auto_captions } : {}),
           ...(args.captions_position !== undefined ? { captions_position: args.captions_position } : {}),
+          ...(args.captions_y !== undefined ? { captions_y: args.captions_y } : {}),
+          ...(args.captions_size !== undefined ? { captions_size: args.captions_size } : {}),
           ...(args.script ? { script: args.script } : {}),
         };
         const job = await api.request("POST", "/api/v1/jobs/overlays", { json: body });
@@ -2027,6 +2142,8 @@ export function createServer(options = {}) {
         description: t.description,
         steps: t.stages,
         needs_character: t.needs_character === true,
+        // Templates that start from your own video (an input_video step).
+        needs_video: t.needs_video === true || (Array.isArray(t.stages) && t.stages.includes("input_video")),
       }));
       const savedList = (graphs.graphs ?? []).map((g) => ({
         graph_id: g.graph_id,
@@ -2040,6 +2157,10 @@ export function createServer(options = {}) {
           (t) =>
             `- ${t.template_id}: ${t.name}. ${t.description ?? ""}${
               t.needs_character ? " (pass character_id to adsoptimiser_run_pipeline)" : ""
+            }${
+              t.needs_video
+                ? " (starts from your video: pass video_job_id, video_url or a local video_path to adsoptimiser_run_pipeline. To caption one finished video, adsoptimiser_add_overlays is simpler.)"
+                : ""
             }`
         ),
         "Saved pipelines:",
@@ -2054,7 +2175,7 @@ export function createServer(options = {}) {
   tool(
     "adsoptimiser_run_pipeline",
     "Run a pipeline",
-    `Start a pipeline run from exactly one of: a template_id or saved graph_id (see adsoptimiser_list_pipelines), or an unsaved graph. An inline graph must use only node types from adsoptimiser_get_pipeline_nodes, keep to ${MAX_GRAPH_NODES} nodes, and should pass adsoptimiser_validate_pipeline first; it is validated again here and not run if invalid. Local image paths in input_image nodes are uploaded for you. character_id fills every character step that has none (required by templates marked needs_character). Each generation step uses plan allowance like a single job (video steps also count toward the daily video quota), so confirm with the user before running. Returns the run id, step count and estimated provider cost; check progress with adsoptimiser_get_pipeline_run.`,
+    `Start a pipeline run from exactly one of: a template_id or saved graph_id (see adsoptimiser_list_pipelines), or an unsaved graph. An inline graph must use only node types from adsoptimiser_get_pipeline_nodes, keep to ${MAX_GRAPH_NODES} nodes, and should pass adsoptimiser_validate_pipeline first; it is validated again here and not run if invalid. Local image paths in input_image nodes and local video paths in input_video nodes are uploaded for you. character_id fills every character step that has none (required by templates marked needs_character). video_job_id, video_url or video_path fills every empty input_video step (required by templates marked needs_video, such as video-recaption). Each generation step uses plan allowance like a single job (video steps also count toward the daily video quota), so confirm with the user before running. Returns the run id, step count and estimated provider cost; check progress with adsoptimiser_get_pipeline_run.`,
     schemas.run_pipeline,
     { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     async (args) => {
@@ -2062,6 +2183,15 @@ export function createServer(options = {}) {
       if (sources.length !== 1) {
         return fail(
           "Pass exactly one of template_id, graph_id (see adsoptimiser_list_pipelines) or graph (an inline pipeline graph)."
+        );
+      }
+      const videoSources = [args.video_job_id, args.video_url, args.video_path].filter((v) => v !== undefined && v !== "");
+      if (videoSources.length > 1) {
+        return fail("Give at most one of video_job_id, video_url or video_path.");
+      }
+      if (videoSources.length && args.graph) {
+        return fail(
+          "For an inline graph, set the video on its input_video step instead of video_job_id, video_url or video_path."
         );
       }
       const start = async () => {
@@ -2083,6 +2213,20 @@ export function createServer(options = {}) {
           body = { graph: resolved.graph };
         } else {
           body = args.graph_id ? { graph_id: args.graph_id } : { template_id: args.template_id };
+          if (args.video_job_id) body.video_job_id = args.video_job_id;
+          if (args.video_url) body.video_url = args.video_url;
+          if (args.video_path) {
+            const file = await inspectLocalMedia(args.video_path, { base: config.cwd, expected: "video" });
+            const { mtimeMs } = await stat(file.path);
+            const key = `${file.path}|${file.size}|${mtimeMs}`;
+            let url = uploadedVideos.get(key);
+            if (!url) {
+              url = (await uploadLocal(file)).source_url;
+              uploadedVideos.set(key, url);
+            }
+            body.video_url = url;
+            uploads.push({ node_id: "input_video", path: file.path, video_url: url });
+          }
         }
         if (args.prompt) body.prompt = args.prompt;
         if (args.character_id) body.character_id = args.character_id;
@@ -2103,7 +2247,7 @@ export function createServer(options = {}) {
           structured
         );
       };
-      return builderGuard(start, { builderRoute: Boolean(args.graph) })();
+      return builderGuard(start, { builderRoute: Boolean(args.graph) })(args);
     }
   );
 
@@ -2211,7 +2355,7 @@ export function createServer(options = {}) {
   tool(
     "adsoptimiser_validate_pipeline",
     "Validate a pipeline graph",
-    `Check a pipeline graph without running or saving it: reports whether it is valid, each problem with the node ids involved, the node count (at most ${MAX_GRAPH_NODES}), the estimated provider cost per run, and whether running it needs a prompt. Uses no allowance. Always validate before adsoptimiser_save_pipeline or adsoptimiser_run_pipeline with a graph; build graphs only from adsoptimiser_get_pipeline_nodes. Local image paths in input_image nodes are uploaded, and the returned graph has them replaced with hosted URLs: pass that graph on to save or run.`,
+    `Check a pipeline graph without running or saving it: reports whether it is valid, each problem with the node ids involved, the node count (at most ${MAX_GRAPH_NODES}), the estimated provider cost per run, and whether running it needs a prompt. Uses no allowance. Always validate before adsoptimiser_save_pipeline or adsoptimiser_run_pipeline with a graph; build graphs only from adsoptimiser_get_pipeline_nodes. Local image paths in input_image nodes and local video paths in input_video nodes are uploaded, and the returned graph has them replaced with hosted URLs: pass that graph on to save or run.`,
     schemas.validate_pipeline,
     // Not read-only: local images in the graph are uploaded.
     { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
@@ -2229,7 +2373,7 @@ export function createServer(options = {}) {
   tool(
     "adsoptimiser_save_pipeline",
     "Save a pipeline",
-    `Save a pipeline graph to the workspace (or update one when graph_id is given) so it can be run later with adsoptimiser_run_pipeline and edited in the app's pipeline editor. Build it only from node types in adsoptimiser_get_pipeline_nodes, keep to ${MAX_GRAPH_NODES} nodes, and check it with adsoptimiser_validate_pipeline first; an invalid graph is refused with its errors. Local image paths in input_image nodes are uploaded for you. Saving uses no allowance.`,
+    `Save a pipeline graph to the workspace (or update one when graph_id is given) so it can be run later with adsoptimiser_run_pipeline and edited in the app's pipeline editor. Build it only from node types in adsoptimiser_get_pipeline_nodes, keep to ${MAX_GRAPH_NODES} nodes, and check it with adsoptimiser_validate_pipeline first; an invalid graph is refused with its errors. Local image paths in input_image nodes and local video paths in input_video nodes are uploaded for you. Saving uses no allowance.`,
     schemas.save_pipeline,
     { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     builderGuard(async ({ name, description, graph: rawGraph, graph_id }) => {
