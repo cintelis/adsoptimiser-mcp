@@ -83,6 +83,7 @@ In any chat: *"connect to Ads Optimiser"*. Claude will call `adsoptimiser_connec
 | `adsoptimiser_generate_image` | Generate an image, with a preview of the result; accepts local reference images (`reference_image_paths`), URLs, earlier jobs or a saved `character_id` |
 | `adsoptimiser_generate_video` | Start a video; text-to-video, or image-to-video from a local image (`source_image_path`), URL or earlier job; `character_id` and `script` for talking clips |
 | `adsoptimiser_lip_sync` | Make the person in a finished clip (a job, a URL or a local `video_path`) say a new line in a designed voice, lip-synced by Kling |
+| `adsoptimiser_add_overlays` | Burn timed text cards or captions into a finished video (a job, a URL or a local `video_path`), or captions timed to the speech with `auto_captions` |
 | `adsoptimiser_get_job` | Status and result URL of one job, with a preview once it is finished |
 | `adsoptimiser_list_jobs` | Recent jobs, filterable by status and type; previews with `include_thumbnails` |
 | `adsoptimiser_list_pipelines` | Pipeline templates and saved pipelines |
@@ -156,7 +157,7 @@ A character is a saved person (an AI influencer, a brand ambassador) that keeps 
 1. **Generate a character sheet.** Ask for the same person from several angles, a full-body shot and a close-up, on a neutral white background with realistic, unretouched skin.
 2. **Save the best shots as a character** with `adsoptimiser_create_character`: finished jobs (`job_ids`), URLs, or your own photos (`image_paths`, checked and uploaded for you), 5 images at most. Add a description (age, face, hair, build, persona) and a voice.
 3. **Preview the voice.** `adsoptimiser_list_voices` lists the xAI presets and the OpenAI voices; `adsoptimiser_preview_voice` plays a short sample, and with `save_to` saves the mp3 so you can listen locally. OpenAI voices take instructions such as accent, pacing and tone.
-4. **Make content.** Pass `character_id` to `adsoptimiser_generate_image` for new scenes (porch, kitchen, garden), to `adsoptimiser_generate_video` with a `script` for a 9:16 talking-to-camera clip, or to a pipeline. For captioned b-roll, animate a scene image and add an `add_captions` step in a pipeline.
+4. **Make content.** Pass `character_id` to `adsoptimiser_generate_image` for new scenes (porch, kitchen, garden), to `adsoptimiser_generate_video` with a `script` for a 9:16 talking-to-camera clip, or to a pipeline. For captioned b-roll, animate a scene image and add text with `adsoptimiser_add_overlays` or an `add_captions` step in a pipeline.
 
 Talking clips in a designed voice now work through lip-sync. There are two ways:
 
@@ -168,6 +169,15 @@ Each lip-sync uses one video generation from the plan allowance and counts towar
 **Everything made with a character** is gathered on its page in the app's **Characters** section: images, videos, talking clips, lip-syncs, voiceovers and captioned clips, the lines it has spoken and its voice previews. From Claude, `adsoptimiser_get_character` gives the counts per kind, the latest items and the latest voice previews, and `adsoptimiser_list_character_assets` lists the whole gallery, filtered by `type` and paged with `cursor`. Ask for *"save everything Amos has made to my Desktop"* and Claude passes `download_to`: the finished images and videos, and the speech mp3 kept with each lip-sync and voiceover, are saved to that folder, up to 20 files per call, without replacing existing files. Pass `character_id` to `adsoptimiser_preview_voice` to keep a preview in that character's history; to save a preview locally, preview the same voice and text again with `save_to` (a repeat is served from cache). On an older Ads Optimiser deployment without the Characters hub, `adsoptimiser_get_character` still returns the character and `adsoptimiser_list_character_assets` says the hub is not available.
 
 `adsoptimiser_generate_video` with a `script` still speaks only xAI preset voices: a character with an OpenAI voice uses its `xai_voice_id` (else eve) there, and the job's `Voice:` note says so. OpenAI voices also narrate: an `add_voiceover` step speaks over a finished video in the character's voice. Characters are edited with `adsoptimiser_update_character` and deleted only in the app. Saving characters and previewing voices use no allowance.
+
+### Overlays and captions
+
+`adsoptimiser_add_overlays` burns text into a finished video (a video job, an https URL, or a local .mp4 or .mov as `video_path`, uploaded for you). There are two kinds of text, and one request can use both:
+
+- **Timed cards and captions (`cues`).** Each cue is `{ text, start, end, position?, style? }`: up to 200 characters shown from `start` to `end` seconds, at the `top`, `center` or `bottom`, as a `caption` line or a bold `card`. Up to 50 cues. Use these for points timed to spoken moments, for example a grade card for each subject as the presenter names it: `{ "text": "Maths: A", "start": 2, "end": 4.5, "style": "card", "position": "center" }`.
+- **Auto captions (`auto_captions: true`).** The server transcribes the speech and captions every word as it is said, in short chunks (`captions_position`, default `bottom`). If you know the script, pass it as `script`: it corrects the transcript's spellings of names, brands and numbers.
+
+The request is checked on your machine first (one source, at least one cue or auto captions, text lengths, timings and values), so a bad one fails before anything is sent or charged. Rendering counts as one creative job from the plan allowance, not a generation; transcription for auto captions costs about US$0.006 per minute of video. The tool returns a job id at once; follow it with `adsoptimiser_get_job`, which reports the cues, whether captions were added, the transcript's word count and the transcription cost. In a pipeline, the `add_captions` step takes the same `cues` and a `timing` of `speech` for captions timed to the words. On an older Ads Optimiser deployment the tool says overlays aren't supported yet.
 
 ### Working with local files
 

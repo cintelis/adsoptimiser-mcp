@@ -38,8 +38,12 @@ import {
   EXAMPLE_GRAPH,
   GRAPH_RULES,
   LIP_SYNC_MODELS,
+  MAX_CUE_TEXT_CHARS,
   MAX_GRAPH_NODES,
+  MAX_OVERLAY_CUES,
   OPENAI_VOICES,
+  OVERLAY_POSITIONS,
+  OVERLAY_STYLES,
   compactNodeType,
   describeNodeType,
   localImageRefs,
@@ -87,7 +91,109 @@ export const CHARACTER_ASSET_KINDS = ["image", "video", "talking", "lip_sync", "
 export const MAX_LIP_SYNC_VIDEO_BYTES = 100 * 1024 * 1024;
 export const MAX_LIP_SYNC_SCRIPT_CHARS = 900;
 /** Friendly names for models whose ids read poorly in a job summary. */
-export const MODEL_LABELS = { "kling-lipsync": "Kling LipSync" };
+export const MODEL_LABELS = { "kling-lipsync": "Kling LipSync", "media-overlays": "Text overlays" };
+/** The model an overlays job records (a creative job, not a generation). */
+export const OVERLAYS_MODEL = "media-overlays";
+
+/**
+ * Every problem the API would report for an overlays request (POST
+ * /api/v1/jobs/overlays), checked here so a bad request fails before
+ * anything is uploaded, sent or charged. `video_path` counts as a source.
+ * @returns {string[]}
+ */
+export function overlayRequestProblems(args = {}) {
+  const problems = [];
+  const sources = ["video_job_id", "video_url", "video_path"].filter(
+    (key) => args[key] !== undefined && args[key] !== ""
+  );
+  if (sources.length !== 1) {
+    problems.push(
+      sources.length
+        ? `Pass exactly one of video_job_id, video_url or video_path, not ${sources.join(" and ")}.`
+        : "Pass exactly one of video_job_id, video_url or video_path (the video to add text to)."
+    );
+  }
+  const cues = args.cues;
+  if (cues !== undefined && !Array.isArray(cues)) {
+    problems.push("cues must be a list of { text, start, end, position?, style? }.");
+  }
+  const cueList = Array.isArray(cues) ? cues : [];
+  if (cueList.length === 0 && args.auto_captions !== true) {
+    problems.push("Give at least one cue in cues, or set auto_captions to true (or both).");
+  }
+  if (cueList.length > MAX_OVERLAY_CUES) {
+    problems.push(`At most ${MAX_OVERLAY_CUES} cues in one request (got ${cueList.length}).`);
+  }
+  cueList.forEach((cue, i) => {
+    const at = `cues[${i}]`;
+    if (!cue || typeof cue !== "object" || Array.isArray(cue)) {
+      problems.push(`${at} must be an object { text, start, end, position?, style? }.`);
+      return;
+    }
+    const text = typeof cue.text === "string" ? cue.text.trim() : null;
+    if (text === null) problems.push(`${at}.text is missing: give the words to show.`);
+    else if (!text) problems.push(`${at}.text is empty.`);
+    else if (text.length > MAX_CUE_TEXT_CHARS) {
+      problems.push(`${at}.text is ${text.length} characters; at most ${MAX_CUE_TEXT_CHARS}.`);
+    }
+    const startOk = typeof cue.start === "number" && Number.isFinite(cue.start);
+    const endOk = typeof cue.end === "number" && Number.isFinite(cue.end);
+    if (!startOk) problems.push(`${at}.start must be a number of seconds.`);
+    else if (cue.start < 0) problems.push(`${at}.start is ${cue.start}; it must be 0 or more.`);
+    if (!endOk) problems.push(`${at}.end must be a number of seconds.`);
+    if (startOk && endOk && cue.end <= cue.start) {
+      problems.push(`${at}.end (${cue.end}) must be after start (${cue.start}).`);
+    }
+    if (cue.position !== undefined && !OVERLAY_POSITIONS.includes(cue.position)) {
+      problems.push(`${at}.position must be ${OVERLAY_POSITIONS.join(", ")}, not ${JSON.stringify(cue.position)}.`);
+    }
+    if (cue.style !== undefined && !OVERLAY_STYLES.includes(cue.style)) {
+      problems.push(`${at}.style must be ${OVERLAY_STYLES.join(" or ")}, not ${JSON.stringify(cue.style)}.`);
+    }
+  });
+  if (args.captions_position !== undefined && !OVERLAY_POSITIONS.includes(args.captions_position)) {
+    problems.push(
+      `captions_position must be ${OVERLAY_POSITIONS.join(", ")}, not ${JSON.stringify(args.captions_position)}.`
+    );
+  }
+  return problems;
+}
+
+/**
+ * What an overlays job's generation_params say: the source, cue count, auto
+ * captions and the transcript's word count, model and cost.
+ */
+export function overlayDetails(params = {}) {
+  const transcript = params.transcript && typeof params.transcript === "object" ? params.transcript : null;
+  return {
+    source_job_id: typeof params.source_job_id === "string" ? params.source_job_id : null,
+    cue_count: Array.isArray(params.cues) ? params.cues.length : 0,
+    auto_captions: params.auto_captions === true,
+    transcript_words: typeof transcript?.words_count === "number" ? transcript.words_count : null,
+    transcript_text: typeof transcript?.text === "string" ? transcript.text : null,
+    transcription_model: typeof transcript?.model === "string" ? transcript.model : null,
+    transcription_cost_usd: typeof transcript?.cost_usd === "number" ? transcript.cost_usd : null,
+    character_id: typeof params.character_id === "string" ? params.character_id : null,
+  };
+}
+
+/** "3 timed cues, auto captions from 42 transcribed words (whisper-1, transcription US$0.0012)". */
+export function describeOverlays(o) {
+  const parts = [];
+  if (o.cue_count) parts.push(`${o.cue_count} timed cue${o.cue_count === 1 ? "" : "s"}`);
+  if (o.auto_captions) {
+    const extra = [
+      ...(o.transcription_model ? [o.transcription_model] : []),
+      ...(o.transcription_cost_usd !== null ? [`transcription ${formatCostUsd(o.transcription_cost_usd)}`] : []),
+    ];
+    parts.push(
+      `auto captions${o.transcript_words !== null ? ` from ${o.transcript_words} transcribed word${o.transcript_words === 1 ? "" : "s"}` : ""}${
+        extra.length ? ` (${extra.join(", ")})` : ""
+      }`
+    );
+  }
+  return parts.length ? parts.join(", ") : "no cues";
+}
 const DEFAULT_IMAGE_MODEL = "grok-imagine-image-2.0";
 
 /**
@@ -201,6 +307,12 @@ export const TOOL_ROUTES = {
     "GET /api/v1/jobs/:id",
     "POST /api/v1/jobs/lip-sync",
   ],
+  adsoptimiser_add_overlays: [
+    "POST /api/v1/jobs/source-media",
+    "POST /api/v1/jobs/overlays",
+    // Only after a 404 for video_job_id, to tell a missing job from an older deployment.
+    "GET /api/v1/jobs/:id",
+  ],
   adsoptimiser_get_job: ["GET /api/v1/jobs/:id", "GET /api/v1/media/thumbnail"],
   adsoptimiser_list_jobs: ["GET /api/v1/jobs", "GET /api/v1/media/thumbnail"],
   adsoptimiser_list_pipelines: ["GET /api/v1/pipelines/templates", "GET /api/v1/pipelines/graphs"],
@@ -258,6 +370,7 @@ const INSTRUCTIONS = [
   "Every generation uses the workspace's monthly plan allowance, so confirm before generating many at once.",
   "Local files: pass absolute paths. Use adsoptimiser_download_job to save finished media to disk.",
   "For a consistent AI person (influencer, brand ambassador): generate a character sheet, save the best shots with adsoptimiser_create_character (local files via image_paths), then pass character_id to adsoptimiser_generate_image, adsoptimiser_generate_video or adsoptimiser_run_pipeline. Audition voices with adsoptimiser_preview_voice. adsoptimiser_get_character summarises what was made with a character; adsoptimiser_list_character_assets lists it all and saves files locally with download_to. For a talking clip in a designed (OpenAI) voice, lip-sync a finished clip with adsoptimiser_lip_sync, or run the character-lip-sync template.",
+  "To put text on a finished video (title cards timed to spoken moments, or captions timed to the speech with auto_captions), use adsoptimiser_add_overlays.",
   `To build a pipeline: call adsoptimiser_get_pipeline_nodes first, use only the node types it lists, keep to ${MAX_GRAPH_NODES} nodes, and check the graph with adsoptimiser_validate_pipeline before saving or running it.`,
 ].join(" ");
 
@@ -552,6 +665,56 @@ export const schemas = {
       .enum(LIP_SYNC_MODELS)
       .optional()
       .describe("Lip-sync model: kling-lipsync (the default, about US$0.014 per 5 seconds)."),
+  }),
+  // Cue fields are typed loosely on purpose: the handler checks them all at
+  // once (overlayRequestProblems) and lists every problem, before anything
+  // is uploaded or sent.
+  add_overlays: z.object({
+    video_job_id: jobId.optional().describe("A finished video job to add the text to."),
+    video_url: httpsUrl.optional().describe("Or an https URL of an .mp4/.mov video."),
+    video_path: localPath
+      .optional()
+      .describe(
+        "Or a local .mp4/.mov video (absolute path, max 120 MB), uploaded for you. Pass exactly one of video_job_id, video_url or video_path."
+      ),
+    cues: z
+      .array(
+        z.object({
+          text: z.string().describe(`The words to show, 1 to ${MAX_CUE_TEXT_CHARS} characters.`),
+          start: z.number().describe("When it appears: seconds from the start of the video, 0 or more."),
+          end: z.number().describe("When it goes: seconds from the start, after start."),
+          position: z
+            .string()
+            .optional()
+            .describe(`Where it sits: ${OVERLAY_POSITIONS.join(", ")}.`),
+          style: z
+            .string()
+            .optional()
+            .describe("caption (a subtitle line) or card (a bold title card)."),
+        })
+      )
+      .optional()
+      .describe(
+        `Timed text, at most ${MAX_OVERLAY_CUES} cues: [{ text, start, end, position?, style? }], each shown from start to end (seconds). position is ${OVERLAY_POSITIONS.join(", ")}; style is ${OVERLAY_STYLES.join(" or ")}.`
+      ),
+    auto_captions: z
+      .boolean()
+      .optional()
+      .describe(
+        "Transcribe the video's speech (whisper-1, about US$0.006 per minute) and add captions timed to the words as they are spoken. Pass cues, auto_captions true, or both."
+      ),
+    captions_position: z
+      .string()
+      .optional()
+      .describe(`Where auto captions sit: ${OVERLAY_POSITIONS.join(", ")}. Default bottom.`),
+    script: z
+      .string()
+      .trim()
+      .min(1)
+      .optional()
+      .describe(
+        "The known script, if you have it: used to correct the transcript's spellings (names, brands, numbers) in auto captions."
+      ),
   }),
   get_job: z.object({
     job_id: jobId,
@@ -955,6 +1118,7 @@ export function createServer(options = {}) {
       ...(job.generation_params?.source_mode === "lip_sync"
         ? { lip_sync: lipSyncDetails(job.generation_params) }
         : {}),
+      ...(job.model === OVERLAYS_MODEL ? { overlays: overlayDetails(job.generation_params ?? {}) } : {}),
       ...fallbackSummary(job),
       ...providerCostSummary(job),
       created_at: job.created_at ?? null,
@@ -979,8 +1143,15 @@ export function createServer(options = {}) {
     };
   }
 
+  /** "lip-sync video", "overlay video", or the asset type. */
+  function jobKind(summary) {
+    if (summary.lip_sync) return "lip-sync video";
+    if (summary.overlays) return "overlay video";
+    return summary.asset_type ?? "asset";
+  }
+
   function describeJob(summary) {
-    const kind = summary.lip_sync ? "lip-sync video" : (summary.asset_type ?? "asset");
+    const kind = jobKind(summary);
     const model = summary.model_label ?? summary.model ?? "model unknown";
     const lines = [`Job ${summary.job_id}: ${kind} ${summary.status ?? "unknown"} (${model})`];
     if (summary.media_url) lines.push(`Result: ${summary.media_url}`);
@@ -993,6 +1164,16 @@ export function createServer(options = {}) {
       if (l.source_job_id) bits.push(`source video job ${l.source_job_id}`);
       if (bits.length) lines.push(`Lip-sync: ${bits.join(", ")}.`);
       if (l.voice_instructions) lines.push(`Voice instructions: ${l.voice_instructions}`);
+    }
+    if (summary.overlays) {
+      const o = summary.overlays;
+      lines.push(
+        `Overlays: ${describeOverlays(o)}${o.source_job_id ? `, source video job ${o.source_job_id}` : ""}. Rendering counts as one creative job (not a generation).`
+      );
+      if (o.transcript_text) {
+        const text = o.transcript_text.length > 300 ? `${o.transcript_text.slice(0, 300)}...` : o.transcript_text;
+        lines.push(`Transcript: ${text}`);
+      }
     }
     if (summary.voice_note) lines.push(`Voice: ${summary.voice_note}`);
     if (summary.fallback_note) lines.push(`${summary.fallback_note}.`);
@@ -1511,7 +1692,7 @@ export function createServer(options = {}) {
   tool(
     "adsoptimiser_generate_video",
     "Generate a video",
-    "Start an ad video generation (text-to-video, or image-to-video from source_image_path, source_image_url or source_job_id). Uses one video generation from the plan allowance and counts toward the daily video quota. Returns immediately with a job id; videos take one to several minutes, so check progress with adsoptimiser_get_job. For a consistent AI influencer pass character_id: with script (the exact words) and no source image you get a 9:16 talking-to-camera clip in the character's voice (talking videos speak xAI preset voices; for a designed OpenAI voice, generate the clip at 720p and follow with adsoptimiser_lip_sync); for silent b-roll, animate a scene image of the character (source_job_id from adsoptimiser_generate_image with character_id) and add on-screen text with a pipeline's add_captions step.",
+    "Start an ad video generation (text-to-video, or image-to-video from source_image_path, source_image_url or source_job_id). Uses one video generation from the plan allowance and counts toward the daily video quota. Returns immediately with a job id; videos take one to several minutes, so check progress with adsoptimiser_get_job. For a consistent AI influencer pass character_id: with script (the exact words) and no source image you get a 9:16 talking-to-camera clip in the character's voice (talking videos speak xAI preset voices; for a designed OpenAI voice, generate the clip at 720p and follow with adsoptimiser_lip_sync); for silent b-roll, animate a scene image of the character (source_job_id from adsoptimiser_generate_image with character_id) and add on-screen text with adsoptimiser_add_overlays or a pipeline's add_captions step.",
     schemas.generate_video,
     { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     async (args) => {
@@ -1639,10 +1820,141 @@ export function createServer(options = {}) {
     }
   );
 
+  /** A 404 body that names no resource: what a deployment without the route answers. */
+  const isGenericNotFound = (err) =>
+    !err.code && /^(not found|http 404|404 not found|404: not found)\.?$/i.test(String(err.message ?? "").trim());
+
+  const OVERLAYS_UNSUPPORTED =
+    "This Ads Optimiser deployment doesn't support overlays yet. Nothing was sent or charged. For captions on a video, run a pipeline with an add_captions step (see adsoptimiser_get_pipeline_nodes), or add the text in the app.";
+
+  /** The problems a 400 answer lists: strings, or objects with a message. */
+  function listedProblems(err) {
+    const raw = err.body?.errors ?? err.body?.problems ?? err.body?.details;
+    if (!Array.isArray(raw)) return [];
+    return raw
+      .map((e) => {
+        if (typeof e === "string") return e;
+        if (e && typeof e === "object") {
+          const where = typeof e.path === "string" ? `${e.path}: ` : typeof e.field === "string" ? `${e.field}: ` : "";
+          return `${where}${String(e.message ?? e.error ?? JSON.stringify(e))}`;
+        }
+        return String(e);
+      })
+      .filter(Boolean);
+  }
+
+  /**
+   * The overlays route's refusals, each with what to do next. Plan limits,
+   * quotas and rate limits (429) keep the general message.
+   */
+  async function describeOverlaysError(err, args) {
+    if (!(err instanceof ApiError)) return null;
+    const msg = String(err.message ?? "").replace(/[.\s]+$/, "");
+    if (err.status === 403 && err.code === "token_scope_denied") return OVERLAYS_UNSUPPORTED;
+    if (err.status === 404) {
+      if (isGenericNotFound(err)) {
+        // A missing route, unless the source job itself is what is missing.
+        const jobMissing = args.video_job_id
+          ? await getJob(args.video_job_id).then(
+              () => false,
+              (e) => e instanceof ApiError && e.status === 404
+            )
+          : false;
+        if (!jobMissing) return OVERLAYS_UNSUPPORTED;
+      }
+      return `Not found: ${msg}. Check video_job_id with adsoptimiser_list_jobs. Nothing was charged.`;
+    }
+    if (err.status === 400 && err.code === "invalid_cues") {
+      const problems = listedProblems(err);
+      return [`The cues were refused: ${msg}.`, ...problems.map((p) => `- ${p}`), "Fix them and try again. Nothing was charged."].join("\n");
+    }
+    if (err.status === 400) {
+      const problems = listedProblems(err);
+      return [`The overlays request was refused: ${msg}.`, ...problems.map((p) => `- ${p}`), "Nothing was charged."].join("\n");
+    }
+    if (err.status === 409) {
+      return `The source video isn't ready yet (${msg}). Wait until adsoptimiser_get_job shows it ready, then try again. Nothing was charged.`;
+    }
+    if (err.status === 415) {
+      return `The source isn't a video (${msg}). Overlays need a finished .mp4 or .mov video. Nothing was charged.`;
+    }
+    if (err.status === 503 && err.code === "transcription_not_configured") {
+      return `Auto captions aren't available on this Ads Optimiser deployment: speech transcription isn't configured (${msg}). Nothing was charged. Pass timed cues instead and leave auto_captions out.`;
+    }
+    if (err.status === 502 && err.code === "transcription_failed") {
+      return `The video's speech could not be transcribed (${msg}). No job was created; try again shortly, or pass timed cues instead of auto_captions.`;
+    }
+    return null;
+  }
+
+  tool(
+    "adsoptimiser_add_overlays",
+    "Add text overlays to a video",
+    `Burn timed text into a finished video: title cards or caption lines shown at set times (cues), and/or captions timed to the speech (auto_captions). The source is a finished video job, an https URL, or a local .mp4/.mov (video_path, max 120 MB, uploaded for you); pass exactly one. Each cue is { text (1 to ${MAX_CUE_TEXT_CHARS} characters), start, end (seconds from the start, 0 <= start < end), position? (${OVERLAY_POSITIONS.join(", ")}), style? (caption or card) }, at most ${MAX_OVERLAY_CUES}. Example, grade cards timed to spoken moments: the presenter says "maths, an A" at about 2 seconds and "science, a B plus" at about 5, so cues [{ "text": "Maths: A", "start": 2, "end": 4.5, "style": "card", "position": "center" }, { "text": "Science: B+", "start": 5, "end": 7.5, "style": "card", "position": "center" }]. Time cards from what you know of the clip; speech runs about 15 characters a second. Use auto_captions when the video has speech and every word should be captioned as it is said: the server transcribes it (whisper-1, about US$0.006 per minute) and adds word-timed caption chunks (captions_position, default bottom). Pass script when you know the words (for example the line given to adsoptimiser_lip_sync or adsoptimiser_generate_video): it corrects the transcript's spellings of names, brands and numbers. Cues and auto_captions combine. Everything is checked on this machine first, so a bad request fails before anything is sent or charged. Rendering counts as one creative job, not a generation. Returns a job id at once; follow it with adsoptimiser_get_job.`,
+    schemas.add_overlays,
+    { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+    async (args) => {
+      const problems = overlayRequestProblems(args);
+      if (problems.length) {
+        return fail(
+          [
+            `Not sent: ${problems.length === 1 ? "one problem" : `${problems.length} problems`} with the overlays request.`,
+            ...problems.map((p) => `- ${p}`),
+            "Nothing was sent or charged.",
+          ].join("\n"),
+          { problems }
+        );
+      }
+      try {
+        let videoUrl = args.video_url;
+        let upload = null;
+        if (args.video_path) {
+          // Checked on this machine first: nothing is uploaded for a bad file.
+          const file = await inspectLocalMedia(args.video_path, { base: config.cwd, expected: "video" });
+          videoUrl = (await uploadLocal(file)).source_url;
+          upload = { path: file.path, video_url: videoUrl };
+        }
+        const cues = (args.cues ?? []).map((cue) => ({
+          text: cue.text.trim(),
+          start: cue.start,
+          end: cue.end,
+          ...(cue.position !== undefined ? { position: cue.position } : {}),
+          ...(cue.style !== undefined ? { style: cue.style } : {}),
+        }));
+        const body = {
+          ...(args.video_job_id ? { video_job_id: args.video_job_id } : { video_url: videoUrl }),
+          ...(cues.length ? { cues } : {}),
+          ...(args.auto_captions !== undefined ? { auto_captions: args.auto_captions } : {}),
+          ...(args.captions_position !== undefined ? { captions_position: args.captions_position } : {}),
+          ...(args.script ? { script: args.script } : {}),
+        };
+        const job = await api.request("POST", "/api/v1/jobs/overlays", { json: body });
+        const summary = { ...summarizeJob(job), ...(upload ? { upload } : {}) };
+        if (!summary.overlays) {
+          // A server that names another model still made an overlays job.
+          summary.overlays = overlayDetails({ cues, auto_captions: args.auto_captions === true, ...(job.generation_params ?? {}) });
+        }
+        if (job.status === "failed") return fail(describeJob(summary), summary);
+        const what = [
+          ...(cues.length ? [`${cues.length} timed cue${cues.length === 1 ? "" : "s"}`] : []),
+          ...(args.auto_captions ? ["auto captions (transcription about US$0.006 per minute of video)"] : []),
+        ].join(" and ");
+        return ok(
+          `${describeJob(summary)}${upload ? `\nUploaded ${upload.path} as the source video.` : ""}\nOverlays started: ${what}. Rendering counts as one creative job from the plan allowance, not a generation. Follow it with adsoptimiser_get_job and this job id.`,
+          summary
+        );
+      } catch (err) {
+        const message = await describeOverlaysError(err, args);
+        if (!message) throw err;
+        return fail(message, { status: err.status, code: err.code, message: err.message });
+      }
+    }
+  );
+
   tool(
     "adsoptimiser_get_job",
     "Get a creative job",
-    "Get the status of an image or video job, with the result URL once it is ready (statuses: queued, generating, ready, failed, expired). A finished image (or a video with a stored poster frame) comes with a small preview image so you can see it.",
+    "Get the status of an image or video job, with the result URL once it is ready (statuses: queued, generating, ready, failed, expired). Lip-sync and overlay jobs say what they did (an overlay job: its cue count, auto captions, transcript words and transcription cost). A finished image (or a video with a stored poster frame) comes with a small preview image so you can see it.",
     schemas.get_job,
     { readOnlyHint: true, openWorldHint: false },
     async ({ job_id, include_thumbnails }) => {
@@ -1676,7 +1988,7 @@ export function createServer(options = {}) {
       const jobs = (result.jobs ?? []).map(summarizeJob);
       const lines = jobs.map(
         (j) =>
-          `- ${j.job_id} ${j.lip_sync ? "lip-sync video" : j.asset_type} ${j.status}${j.media_url ? ` ${j.media_url}` : ""} "${String(j.prompt ?? "").slice(0, 80)}"${j.fallback_note ? ` [${j.fallback_note}]` : ""}`
+          `- ${j.job_id} ${j.lip_sync || j.overlays ? jobKind(j) : j.asset_type} ${j.status}${j.media_url ? ` ${j.media_url}` : ""} "${String(j.prompt ?? "").slice(0, 80)}"${j.fallback_note ? ` [${j.fallback_note}]` : ""}${j.overlays ? ` [${describeOverlays(j.overlays)}]` : ""}`
       );
       const total = result.total ?? jobs.length;
       const listed = ok(`${total} job(s) in total; showing ${jobs.length}.\n${lines.join("\n")}`, {

@@ -116,6 +116,11 @@ describe("bundled server (dist/server.mjs)", () => {
         assert.ok(view.inputSchema.properties[field], `view_image takes ${field}`);
       }
       assert.ok(JSON.stringify(view.inputSchema.properties.size).includes("1536"), "view_image offers 1536px");
+      const overlays = tools.find((t) => t.name === "adsoptimiser_add_overlays");
+      assert.equal(overlays.inputSchema.required, undefined, "add_overlays takes one of several sources");
+      for (const field of ["video_job_id", "video_url", "video_path", "cues", "auto_captions", "captions_position", "script"]) {
+        assert.ok(overlays.inputSchema.properties[field], `add_overlays takes ${field}`);
+      }
     });
 
     it("answers a tool call", async () => {
