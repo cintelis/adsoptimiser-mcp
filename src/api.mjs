@@ -239,6 +239,14 @@ export function describeError(err, config) {
   if (err.code === "openai_voices_not_configured") {
     return `OpenAI voices are not available on this Ads Optimiser deployment (${err.message}). Use an xAI preset voice instead, for example { "provider": "xai", "voice_id": "eve" } (see adsoptimiser_list_voices).`;
   }
+  if (err.code === "openai_images_not_configured") {
+    const listed = validationErrors(err);
+    return `OpenAI image models (GPT Image 2.5 Sunburst and Flare) aren't configured on this Ads Optimiser deployment (${stripStop(
+      err.message
+    )}). Nothing was charged. Use a Grok image model instead, for example grok-imagine-image-2.0 (see adsoptimiser_list_models).${listed
+      .map((e) => `\n- ${e}`)
+      .join("")}`;
+  }
   if (err.code === "not_connected") {
     return `${err.message} Call adsoptimiser_connect to sign in.`;
   }
@@ -284,9 +292,32 @@ export function describeError(err, config) {
   if ([400, 409, 415, 422].includes(err.status)) {
     const errors = validationErrors(err);
     const list = errors.map((e) => `\n- ${e}`).join("");
-    return `The request was rejected: ${err.message}${list}`;
+    return `The request was rejected: ${err.message}${list}${imageRejectionHint(err)}`;
   }
   return `Ads Optimiser returned an error (HTTP ${err.status}): ${err.message}. Try again shortly.`;
+}
+
+function stripStop(message) {
+  return String(message ?? "").replace(/[.\s]+$/, "");
+}
+
+/**
+ * What to do after the API refuses an image model or its options: an unknown
+ * model, or an aspect ratio GPT Image 2.5 cannot deliver.
+ */
+function imageRejectionHint(err) {
+  const message = String(err.message ?? "");
+  if (err.status !== 400) return "";
+  if (/unknown image model/i.test(message)) {
+    return "\nCall adsoptimiser_list_models to see the image models this deployment offers.";
+  }
+  if (/aspect_ratio/i.test(message) && /gpt-image/i.test(message)) {
+    return "\nGPT Image 2.5 takes 1:1, 2:3, 9:16, 3:2, 16:9 or auto: 9:16 is delivered as 2:3 (1024x1536) and 16:9 as 3:2 (1536x1024).";
+  }
+  if (/resolution/i.test(message) && /gpt-image/i.test(message)) {
+    return "\nGPT Image 2.5 sizes the image from aspect_ratio; leave resolution out.";
+  }
+  return "";
 }
 
 /** The string errors a 400/422 answer lists (for example voice or character validation). */

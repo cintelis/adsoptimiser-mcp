@@ -89,6 +89,96 @@ export const MAX_LIP_SYNC_SCRIPT_CHARS = 900;
 /** Friendly names for models whose ids read poorly in a job summary. */
 export const MODEL_LABELS = { "kling-lipsync": "Kling LipSync" };
 const DEFAULT_IMAGE_MODEL = "grok-imagine-image-2.0";
+
+/**
+ * Image model rules, mirroring the API (POST /api/v1/jobs, see the contract
+ * in the worker's routes/api-v1.ts). Only combinations the API is known to
+ * refuse are checked here, so a bad request fails before anything is sent;
+ * a model this package does not know is left for the API to judge.
+ */
+export const OPENAI_IMAGE_MODELS = ["gpt-image-2.5-sunburst", "gpt-image-2.5-flare"];
+/** 9:16 and 2:3 are both delivered at 1024x1536; 16:9 and 3:2 at 1536x1024. */
+export const OPENAI_IMAGE_ASPECT_RATIOS = ["1:1", "2:3", "9:16", "3:2", "16:9", "auto"];
+/** Every quality any image model takes (high is OpenAI only). */
+export const IMAGE_QUALITIES = ["low", "medium", "high", "auto"];
+/** Grok image models that take quality (the retired aliases are served as 2.0). */
+const GROK_QUALITY_MODELS = ["grok-imagine-image-2.0", "grok-imagine-image-quality", "grok-imagine-image-pro"];
+/** Known image models that take no quality at all. */
+const NO_QUALITY_IMAGE_MODELS = ["grok-imagine-image", "photon-1", "photon-flash-1"];
+/** Display names for image models whose ids say little on their own. */
+export const IMAGE_MODEL_NAMES = {
+  "gpt-image-2.5-sunburst": "GPT Image 2.5 Sunburst",
+  "gpt-image-2.5-flare": "GPT Image 2.5 Flare",
+  "grok-imagine-image-2.0": "Grok Image 2.0",
+  "grok-imagine-image": "Grok Image",
+};
+const OPENAI_SIZES_NOTE =
+  "1:1 is 1024x1024, 2:3 and 9:16 are 1024x1536, 3:2 and 16:9 are 1536x1024, auto lets the model pick";
+
+/**
+ * Why the API would refuse these image options for `model`, or null. The
+ * message says what to change; nothing has been sent or charged.
+ * @param {{ model?: string, aspect_ratio?: string, resolution?: string, quality?: string }} options
+ */
+export function imageOptionsError({ model, aspect_ratio, resolution, quality } = {}) {
+  const id = String(model ?? DEFAULT_IMAGE_MODEL).trim();
+  const ratio = typeof aspect_ratio === "string" ? aspect_ratio.trim() : "";
+  if (OPENAI_IMAGE_MODELS.includes(id)) {
+    if (ratio && !OPENAI_IMAGE_ASPECT_RATIOS.includes(ratio)) {
+      return `${id} takes aspect_ratio ${OPENAI_IMAGE_ASPECT_RATIOS.join(", ")}, not ${ratio}. For TikTok vertical use 9:16 (delivered as 2:3, 1024x1536); for landscape 16:9 (delivered as 3:2, 1536x1024). Nothing was sent or charged.`;
+    }
+    if (resolution) {
+      return `${id} takes no resolution: the size follows aspect_ratio (${OPENAI_SIZES_NOTE}). Leave resolution out. Nothing was sent or charged.`;
+    }
+    if (quality !== undefined && !IMAGE_QUALITIES.includes(quality)) {
+      return `quality must be one of ${IMAGE_QUALITIES.join(", ")} for ${id}. Nothing was sent or charged.`;
+    }
+    return null;
+  }
+  if (quality === undefined) return null;
+  if (quality === "high" && (GROK_QUALITY_MODELS.includes(id) || NO_QUALITY_IMAGE_MODELS.includes(id))) {
+    return `quality high is for the OpenAI models only (gpt-image-2.5-sunburst, gpt-image-2.5-flare); ${
+      GROK_QUALITY_MODELS.includes(id) ? `${id} takes low, medium or auto` : `${id} takes no quality`
+    }. Nothing was sent or charged.`;
+  }
+  if (NO_QUALITY_IMAGE_MODELS.includes(id)) {
+    return `${id} takes no quality; leave it out (quality is for grok-imagine-image-2.0 and the OpenAI models). Nothing was sent or charged.`;
+  }
+  return null;
+}
+
+/**
+ * The Grok -> OpenAI image fallback (generation_params.fallback): which
+ * model made a ready image and why, or what was retried for a failed one.
+ * Older servers never send the record.
+ */
+export function fallbackSummary(job) {
+  const raw = job?.generation_params?.fallback;
+  if (!raw || typeof raw !== "object") return {};
+  if (typeof raw.to !== "string" || typeof raw.reason !== "string") return {};
+  const name = IMAGE_MODEL_NAMES[raw.to] ?? raw.to;
+  const cause = raw.reason === "timeout" ? "Grok timed out" : `Grok failed (${raw.reason})`;
+  const note = job.status === "ready" ? `Generated with ${name} after ${cause}` : `${cause}; retried once on ${name}`;
+  return {
+    fallback_note: note,
+    fallback: { from: typeof raw.from === "string" ? raw.from : null, to: raw.to, reason: raw.reason },
+  };
+}
+
+/** The provider cost an OpenAI-made image records (generation_params.provider_usage). */
+export function providerCostSummary(job) {
+  const usage = job?.generation_params?.provider_usage;
+  if (!usage || typeof usage !== "object" || typeof usage.cost_usd !== "number") return {};
+  return {
+    provider_cost_usd: usage.cost_usd,
+    ...(typeof usage.provider === "string" ? { provider: usage.provider } : {}),
+  };
+}
+
+/** US$0.0114: enough places for a fraction of a cent, no trailing zeros. */
+function formatCostUsd(value) {
+  return `US$${Number(value.toFixed(value >= 1 ? 2 : 4))}`;
+}
 const DEFAULT_VIDEO_MODEL = "grok-imagine-video";
 
 /** Which API routes each tool calls. Documented contract, asserted in tests. */
@@ -163,7 +253,7 @@ export const TOOL_ROUTES = {
 };
 
 const INSTRUCTIONS = [
-  "Ads Optimiser generates TikTok ad images and videos with Grok.",
+  "Ads Optimiser generates TikTok ad images and videos with Grok, and images also with OpenAI GPT Image 2.5 where the deployment offers it (gpt-image-2.5-sunburst follows detailed specs closely).",
   "If a tool says it is not connected, call adsoptimiser_connect and give the user the URL and code; after they approve in the browser, call adsoptimiser_finish_connect.",
   "Every generation uses the workspace's monthly plan allowance, so confirm before generating many at once.",
   "Local files: pass absolute paths. Use adsoptimiser_download_job to save finished media to disk.",
@@ -337,17 +427,26 @@ export const schemas = {
       .string()
       .max(64)
       .optional()
-      .describe("Model id from adsoptimiser_list_models. Defaults to grok-imagine-image-2.0."),
+      .describe(
+        "Model id from adsoptimiser_list_models. Defaults to grok-imagine-image-2.0. Also: grok-imagine-image (fastest Grok), gpt-image-2.5-sunburst (OpenAI, follows detailed specs closely) and gpt-image-2.5-flare (OpenAI, fast) where the deployment offers them."
+      ),
     aspect_ratio: z
       .string()
       .max(10)
       .optional()
-      .describe("For example 9:16 (TikTok vertical), 1:1 or 16:9. See adsoptimiser_list_models."),
-    resolution: z.enum(["1k", "2k"]).optional(),
-    quality: z
-      .enum(["low", "medium", "auto"])
+      .describe(
+        "For example 9:16 (TikTok vertical), 1:1 or 16:9. See adsoptimiser_list_models for all values (OpenAI models take 1:1, 2:3, 9:16, 3:2, 16:9 or auto)."
+      ),
+    resolution: z
+      .enum(["1k", "2k"])
       .optional()
-      .describe("Grok Image 2.0 only. low is fastest (about 13s); medium and auto can take 45 to 50s."),
+      .describe("Grok models only. OpenAI models size the image from aspect_ratio."),
+    quality: z
+      .enum(IMAGE_QUALITIES)
+      .optional()
+      .describe(
+        "Grok Image 2.0: low (fastest, about 13s), medium or auto (45 to 50s); no high. OpenAI models: low, medium (default), high or auto. grok-imagine-image takes none."
+      ),
     reference_image_paths: z
       .array(localPath)
       .min(1)
@@ -661,7 +760,12 @@ export const schemas = {
     model: z.string().max(64).optional(),
     aspect_ratio: z.string().max(10).optional().describe("Videos default to 9:16."),
     resolution: z.string().max(10).optional().describe("Images: 1k or 2k. Videos: 480p, 720p or 1080p."),
-    quality: z.enum(["low", "medium", "auto"]).optional().describe("Grok Image 2.0 only."),
+    quality: z
+      .enum(IMAGE_QUALITIES)
+      .optional()
+      .describe(
+        "Images only. Grok Image 2.0: low, medium or auto. OpenAI models: low, medium (default), high or auto."
+      ),
     duration: z.number().int().min(1).max(15).optional().describe("Videos: seconds, 1 to 15."),
     max_items: z
       .number()
@@ -851,6 +955,8 @@ export function createServer(options = {}) {
       ...(job.generation_params?.source_mode === "lip_sync"
         ? { lip_sync: lipSyncDetails(job.generation_params) }
         : {}),
+      ...fallbackSummary(job),
+      ...providerCostSummary(job),
       created_at: job.created_at ?? null,
       updated_at: job.updated_at ?? null,
     };
@@ -889,6 +995,12 @@ export function createServer(options = {}) {
       if (l.voice_instructions) lines.push(`Voice instructions: ${l.voice_instructions}`);
     }
     if (summary.voice_note) lines.push(`Voice: ${summary.voice_note}`);
+    if (summary.fallback_note) lines.push(`${summary.fallback_note}.`);
+    if (typeof summary.provider_cost_usd === "number") {
+      lines.push(
+        `Provider cost: ${formatCostUsd(summary.provider_cost_usd)}${summary.provider ? ` (${summary.provider})` : ""}.`
+      );
+    }
     lines.push(`Open in Ads Optimiser: ${summary.app_url}`);
     return lines.join("\n");
   }
@@ -1344,10 +1456,12 @@ export function createServer(options = {}) {
   tool(
     "adsoptimiser_generate_image",
     "Generate an image",
-    "Generate an ad image with Grok (or Luma where enabled). Uses one image generation from the workspace's monthly plan allowance. Usually returns the finished image URL with a small preview so you can check it; if it takes longer, returns the job id to check with adsoptimiser_get_job. To edit or restyle existing images pass reference_image_paths (local files, uploaded for you), reference_image_urls or reference_job_ids. For an AI influencer, first generate a character sheet (the same person from several angles, a full-body shot and a close-up, neutral white background, realistic unretouched skin), save the best shots with adsoptimiser_create_character, then pass character_id to place that person in new scenes (porch, kitchen, garden...).",
+    "Generate an ad image with Grok (or OpenAI GPT Image 2.5, or Luma, where enabled; see adsoptimiser_list_models). If Grok fails upstream the server may retry once on GPT Image 2.5 Sunburst; the result then says so. Uses one image generation from the workspace's monthly plan allowance. Usually returns the finished image URL with a small preview so you can check it; if it takes longer, returns the job id to check with adsoptimiser_get_job. To edit or restyle existing images pass reference_image_paths (local files, uploaded for you), reference_image_urls or reference_job_ids. For an AI influencer, first generate a character sheet (the same person from several angles, a full-body shot and a close-up, neutral white background, realistic unretouched skin), save the best shots with adsoptimiser_create_character, then pass character_id to place that person in new scenes (porch, kitchen, garden...).",
     schemas.generate_image,
     { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     async (args) => {
+      const optionsError = imageOptionsError(args);
+      if (optionsError) return fail(optionsError);
       const total =
         (args.reference_image_paths?.length ?? 0) +
         (args.reference_image_urls?.length ?? 0) +
@@ -1562,7 +1676,7 @@ export function createServer(options = {}) {
       const jobs = (result.jobs ?? []).map(summarizeJob);
       const lines = jobs.map(
         (j) =>
-          `- ${j.job_id} ${j.lip_sync ? "lip-sync video" : j.asset_type} ${j.status}${j.media_url ? ` ${j.media_url}` : ""} "${String(j.prompt ?? "").slice(0, 80)}"`
+          `- ${j.job_id} ${j.lip_sync ? "lip-sync video" : j.asset_type} ${j.status}${j.media_url ? ` ${j.media_url}` : ""} "${String(j.prompt ?? "").slice(0, 80)}"${j.fallback_note ? ` [${j.fallback_note}]` : ""}`
       );
       const total = result.total ?? jobs.length;
       const listed = ok(`${total} job(s) in total; showing ${jobs.length}.\n${lines.join("\n")}`, {
@@ -2519,6 +2633,10 @@ export function createServer(options = {}) {
         sourceLabel = folder;
       }
       if (items.length === 0) return fail(`Nothing to generate: no usable items in ${sourceLabel}.`);
+      const makesImages =
+        args.mode === "image_edit" || (args.mode === "prompts" && (args.asset_type ?? "image") === "image");
+      const optionsError = makesImages ? imageOptionsError(args) : null;
+      if (optionsError) return fail(optionsError);
       if (offset >= items.length) {
         return fail(`offset ${offset} is past the end: ${sourceLabel} has ${items.length} item(s).`);
       }

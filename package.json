@@ -1,6 +1,6 @@
 {
   "name": "@cintelisai/adsoptimiser-mcp",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "MCP server for Ads Optimiser: generate TikTok ad images and videos from Claude, with local file upload and download. Device-flow sign-in, no API keys.",
   "type": "module",
   "main": "dist/server.mjs",
