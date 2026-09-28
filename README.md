@@ -95,6 +95,7 @@ In any chat: *"connect to Ads Optimiser"*. Claude will call `adsoptimiser_connec
 | `adsoptimiser_list_characters` | Saved characters with their images, description, style and voice |
 | `adsoptimiser_get_character` | One character with every reference image (previewed) and the job it came from, plus counts of what was made with it, the latest items and the latest voice previews |
 | `adsoptimiser_list_character_assets` | Everything made with a character, filterable by type and paged; previews with `include_thumbnails`; with `download_to` the finished files and speech mp3s are saved locally |
+| `adsoptimiser_view_image` | One image (a job, a media key or a character's reference image) at 768, 1024 or 1536 px, optionally cropped to zoom into a region, for checking detail; with `save_to` it is also saved locally |
 | `adsoptimiser_create_character` | Save a character from 1 to 5 images: local files (`image_paths`), URLs or finished jobs, with an optional voice (uses no allowance) |
 | `adsoptimiser_update_character` | Change a character's name, description, style, voice or images (uses no allowance) |
 | `adsoptimiser_list_voices` | xAI preset voices and OpenAI voices, and whether OpenAI voices are available |
@@ -118,6 +119,8 @@ Tools attach small preview images (384 px) to their results, so Claude can look 
 | `adsoptimiser_list_character_assets` | up to 6 finished images on the page | off |
 
 To keep results small, each preview is at most 600,000 bytes (base64) and one result carries at most 1,500,000 bytes of images; anything over is left out and named in the reply. Videos are previewed only when a poster frame is stored. Reference images hosted elsewhere are not previewed. A preview that fails never fails the tool: the reply says what was not previewed and why. On an Ads Optimiser deployment that predates previews, the reply says the deployment doesn't serve previews yet. Previews use no allowance.
+
+To check detail (colours, small features, text, the views on a character sheet), ask Claude to look closer: `adsoptimiser_view_image` returns one image at 768, 1024 or 1536 px (default 1024), and its `crop` zooms into a region given as fractions of the original, for example `{ x: 0.3, y: 0.5, width: 0.4, height: 0.3 }`. Each image is at most 2,000,000 bytes (base64); a larger one is fetched again one size smaller. For characters, separate images per view show far more detail than one sheet holding many views. On an older deployment it says view_image isn't supported yet.
 
 Claude Code limits how large a tool result may be (the `MAX_MCP_OUTPUT_TOKENS` setting). If a result with several previews is cut off or refused, ask Claude to call the tool with `include_thumbnails` set to `false`, or raise that limit.
 
@@ -190,7 +193,7 @@ Use **this package** when you want Claude to work with local files: upload produ
 - Tokens are per machine and individually revocable: each appears in the app under **Profile > API tokens**, where you can revoke it. `adsoptimiser_disconnect` revokes it on the server and deletes the local copy. If a token is revoked elsewhere, the next tool call deletes the local copy and asks you to reconnect; if you lose access to the workspace, the tools tell you to reconnect to another one.
 - Uploaded files are stored by Ads Optimiser under unguessable URLs so the generation models can read them. Do not upload anything you would not put in an ad.
 - Media downloads fetch the public media URL directly; the token is not sent with them.
-- Previews are fetched from the Ads Optimiser API (`/api/v1/media/thumbnail`) with the token, like every other API call. Nothing is fetched from another host, and the token is only ever sent to the API host.
+- Previews and `adsoptimiser_view_image` images are fetched from the Ads Optimiser API (`/api/v1/media/thumbnail`) with the token, like every other API call. Nothing is fetched from another host, and the token is only ever sent to the API host.
 
 ## Releasing
 

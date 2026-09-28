@@ -50,9 +50,21 @@ import {
 import {
   THUMBNAIL_LIMITS,
   THUMBNAIL_SIZE,
+  VIEW_IMAGE_CROP_HINT,
+  VIEW_IMAGE_DEFAULT_SIZE,
+  VIEW_IMAGE_MAX_IMAGE_BYTES,
+  VIEW_IMAGE_MIME_TYPES,
+  VIEW_IMAGE_SIZES,
+  VIEW_IMAGE_UNSUPPORTED,
   attachThumbnails,
+  characterImageTarget,
   characterThumbnails,
+  cropError,
+  cropParam,
+  headerInt,
   jobThumbnail,
+  nextSmallerSize,
+  viewImageUnsupported,
 } from "./thumbnails.mjs";
 
 /* global __ADSOPTIMISER_VERSION__ */
@@ -140,6 +152,11 @@ export const TOOL_ROUTES = {
   adsoptimiser_update_character: [
     "POST /api/v1/jobs/source-media",
     "PATCH /api/v1/characters/:character_id",
+  ],
+  adsoptimiser_view_image: [
+    // Only for character_id + image_index, to find the image.
+    "GET /api/v1/characters/:character_id",
+    "GET /api/v1/media/thumbnail",
   ],
   adsoptimiser_list_voices: ["GET /api/v1/voices"],
   adsoptimiser_preview_voice: ["POST /api/v1/voices/preview", "GET /media/:key"],
@@ -532,6 +549,49 @@ export const schemas = {
     character_id: characterId,
     name: z.string().trim().min(1).max(80).optional(),
     ...characterFields,
+  }),
+  view_image: z.object({
+    job_id: jobId.optional().describe("A finished image job (or a video job with a poster frame)."),
+    key: z
+      .string()
+      .trim()
+      .min(1)
+      .max(1024)
+      .optional()
+      .describe("A media storage key in this workspace, e.g. the part of a media URL after /media/."),
+    character_id: characterId
+      .optional()
+      .describe("A saved character; pass image_index to choose which reference image."),
+    image_index: z
+      .number()
+      .int()
+      .min(1)
+      .max(MAX_CHARACTER_IMAGES)
+      .optional()
+      .describe(`Which of the character's reference images, 1 to ${MAX_CHARACTER_IMAGES} (as listed by adsoptimiser_get_character).`),
+    size: z
+      .union(VIEW_IMAGE_SIZES.map((n) => z.literal(n)))
+      .optional()
+      .describe(`Longest side in px: ${VIEW_IMAGE_SIZES.join(", ")}. Default ${VIEW_IMAGE_DEFAULT_SIZE}. Images are never upscaled.`),
+    crop: z
+      .object({
+        x: z.number().min(0).max(1).describe("Left edge, as a fraction of the original width."),
+        y: z.number().min(0).max(1).describe("Top edge, as a fraction of the original height."),
+        width: z.number().min(0).max(1).describe("Width, as a fraction of the original (at least 0.05)."),
+        height: z.number().min(0).max(1).describe("Height, as a fraction of the original (at least 0.05)."),
+      })
+      .strict()
+      .optional()
+      .describe(
+        "Zoom into a region: fractions of the original image, applied before scaling. x + width and y + height must not exceed 1. Example { x: 0.3, y: 0.5, width: 0.4, height: 0.3 }."
+      ),
+    save_to: z
+      .string()
+      .max(4096)
+      .optional()
+      .describe(
+        "Also save the returned image in this local folder (created if missing). Use \"\" for the default ./adsoptimiser-output (or ADSOPTIMISER_OUTPUT_DIR). Existing files are never replaced."
+      ),
   }),
   list_voices: z.object({}),
   preview_voice: z.object({
@@ -1896,6 +1956,202 @@ export function createServer(options = {}) {
       if (include_thumbnails === false) return result;
       const { targets, notes } = characterThumbnails(baseUrl, summary.images);
       return attachThumbnails(api, result, targets, THUMBNAIL_LIMITS.get_character, notes);
+    }
+  );
+
+  // -------------------------------------------------------------------------
+  // View image
+  // -------------------------------------------------------------------------
+
+  /** The clearest message for a view_image failure, as a tool error. */
+  function viewImageFailure(err, what) {
+    if (!(err instanceof ApiError)) return toToolError(err, config);
+    const structured = { status: err.status, code: err.code, message: err.message };
+    const reason = typeof err.body?.reason === "string" ? err.body.reason : null;
+    if (reason) structured.reason = reason;
+    const say = (message) => fail(message, structured);
+    if (viewImageUnsupported(err)) {
+      return say(`Can't view ${what}: ${VIEW_IMAGE_UNSUPPORTED}.`);
+    }
+    if (err.status === 404) {
+      return say(`Can't view ${what}: not found in this workspace (${err.message}).`);
+    }
+    if (err.status === 409 && err.code === "job_not_ready") {
+      return say(
+        `Can't view ${what}: the job is not finished yet. Check it with adsoptimiser_get_job and try again once it is ready.`
+      );
+    }
+    if (err.status === 415 || err.code === "not_an_image") {
+      return say(`Can't view ${what}: it is not an image (${err.message}).`);
+    }
+    if (err.status === 400 && err.code === "invalid_crop") {
+      return say(`Can't view ${what}: the crop was refused (${err.message}). ${VIEW_IMAGE_CROP_HINT}.`);
+    }
+    if (err.code === "thumbnail_unavailable" || err.status === 422) {
+      if (reason === "video_without_poster") {
+        return say(`Can't view ${what}: it is a video with no poster frame. Open its media URL to watch it.`);
+      }
+      if (reason === "transform_not_configured") {
+        return say(
+          `Can't view ${what}: this Ads Optimiser deployment can't resize images right now (image transformations are not configured).`
+        );
+      }
+      if (reason === "transform_failed") {
+        return say(`Can't view ${what}: the image could not be resized. Try another size or crop, or try again shortly.`);
+      }
+      return say(`Can't view ${what}: the image is unavailable right now (${err.message}).`);
+    }
+    return toToolError(err, config);
+  }
+
+  tool(
+    "adsoptimiser_view_image",
+    "View an image",
+    `See one image at a larger size (${VIEW_IMAGE_SIZES.join(", ")} px; default ${VIEW_IMAGE_DEFAULT_SIZE}) to check detail: colours, small features, text, or the views on a character sheet. Previews in other tools are small (${THUMBNAIL_SIZE}px). Pass exactly one of job_id, key, or character_id with image_index. Use crop to zoom into a region: fractions of the original image, e.g. { x: 0.3, y: 0.5, width: 0.4, height: 0.3 }. For characters, prefer separate images per view: each shows far more detail than one sheet holding many views. Only in this package: save_to also saves the returned image to a local folder. Uses no allowance.`,
+    schemas.view_image,
+    // Not read-only: save_to writes a local file. The API side only reads.
+    { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    async ({ job_id, key, character_id, image_index, size, crop, save_to }) => {
+      const given = [job_id, key, character_id].filter((v) => v !== undefined).length;
+      if (given !== 1) {
+        return fail("Pass exactly one of job_id, key, or character_id (with image_index).");
+      }
+      if (character_id !== undefined && image_index === undefined) {
+        return fail(`character_id needs image_index (1 to ${MAX_CHARACTER_IMAGES}): which reference image to view.`);
+      }
+      if (image_index !== undefined && character_id === undefined) {
+        return fail("image_index only applies with character_id.");
+      }
+      if (crop !== undefined) {
+        const problem = cropError(crop);
+        if (problem) return fail(`Invalid crop: ${problem} ${VIEW_IMAGE_CROP_HINT}.`);
+      }
+      // Refuse a bad folder before anything is fetched.
+      const folder = save_to !== undefined ? resolveOutputFolder(save_to, config.output) : null;
+
+      let source;
+      let what;
+      let fileStem;
+      if (job_id !== undefined) {
+        source = { type: "job", job_id };
+        what = `job ${job_id}`;
+        fileStem = `view-${job_id}`;
+      } else if (key !== undefined) {
+        source = { type: "key", key };
+        what = `key ${key}`;
+        const base = key.split("/").pop() || "image";
+        fileStem = `view-${base.replace(/\.[A-Za-z0-9]+$/, "")}`;
+      } else {
+        const character = await api.request("GET", `/api/v1/characters/${encodeURIComponent(character_id)}`);
+        const summary = summarizeCharacter(character);
+        const target = characterImageTarget(baseUrl, summary.images, image_index);
+        const name = summary.name ? `${summary.name} (${character_id})` : character_id;
+        what = `reference image ${image_index} of character ${name}`;
+        if (target.missing) {
+          return fail(
+            `Character ${name} has ${summary.images.length} reference image(s); image_index must be 1 to ${summary.images.length}.`
+          );
+        }
+        if (target.external !== undefined) {
+          return fail(
+            `Can't view ${what}: it is an external URL (${target.external}), not stored in Ads Optimiser, so it is not fetched. Open the URL to see it.`
+          );
+        }
+        source = {
+          type: "character",
+          character_id,
+          image_index,
+          ...(target.key ? { key: target.key } : { job_id: target.job_id }),
+        };
+        fileStem = `view-${character_id}-${image_index}`;
+      }
+
+      const requested = size ?? VIEW_IMAGE_DEFAULT_SIZE;
+      const fetchAt = (px) => {
+        const params = new URLSearchParams();
+        if (source.key) params.set("key", source.key);
+        else params.set("job_id", source.job_id);
+        params.set("size", String(px));
+        if (crop) params.set("crop", cropParam(crop));
+        return api.requestBinary(`/api/v1/media/thumbnail?${params}`, { timeoutMs: 60_000 });
+      };
+      const isImage = (r) => VIEW_IMAGE_MIME_TYPES.has(r.contentType) && r.bytes.length > 0;
+      const limit = VIEW_IMAGE_MAX_IMAGE_BYTES.toLocaleString("en-AU");
+
+      let fetchedSize = requested;
+      let res;
+      try {
+        res = await fetchAt(fetchedSize);
+      } catch (err) {
+        return viewImageFailure(err, what);
+      }
+      if (!isImage(res)) {
+        return fail(`Can't view ${what}: the answer was not an image (${res.contentType || "no content type"}).`);
+      }
+      const notes = [];
+      let data = res.bytes.toString("base64");
+      const smaller = nextSmallerSize(fetchedSize);
+      if (data.length > VIEW_IMAGE_MAX_IMAGE_BYTES && smaller) {
+        let retry;
+        try {
+          retry = await fetchAt(smaller);
+        } catch (err) {
+          return viewImageFailure(err, what);
+        }
+        if (isImage(retry)) {
+          notes.push(`At ${fetchedSize}px the image was over the ${limit}-byte limit, so it was fetched again at ${smaller}px.`);
+          res = retry;
+          fetchedSize = smaller;
+          data = retry.bytes.toString("base64");
+        }
+      }
+      const attach = data.length <= VIEW_IMAGE_MAX_IMAGE_BYTES;
+      if (!attach) {
+        notes.push(
+          `The image is still over ${limit} bytes (base64) at ${fetchedSize}px, so it is not attached. Use crop to view part of it.`
+        );
+      }
+
+      const width = headerInt(res.headers, "x-image-width");
+      const height = headerInt(res.headers, "x-image-height");
+      const originalWidth = headerInt(res.headers, "x-original-width");
+      const originalHeight = headerInt(res.headers, "x-original-height");
+      const structured = {
+        source,
+        width,
+        height,
+        original_width: originalWidth,
+        original_height: originalHeight,
+        crop: crop ?? null,
+        size: fetchedSize,
+        mime_type: res.contentType,
+      };
+      if (fetchedSize !== requested) structured.requested_size = requested;
+      if (!attach) structured.attached = false;
+
+      const dims = (w, h) => (w && h ? `${w} x ${h}` : "size unknown");
+      const lines = [
+        `Viewing ${what}.`,
+        `Returned ${dims(width, height)} (size ${fetchedSize}); original ${dims(originalWidth, originalHeight)}.`,
+      ];
+      if (crop) {
+        lines.push(`Crop: x ${crop.x}, y ${crop.y}, width ${crop.width}, height ${crop.height} of the original.`);
+      }
+      lines.push(...notes);
+      if (folder) {
+        const ext = extensionFor({ contentType: res.contentType, assetType: "image" });
+        const label = `${width && height ? `${width}x${height}` : `${fetchedSize}px`}${crop ? " crop" : ""}`;
+        const saved = await saveStream(new Blob([res.bytes]).stream(), folder, downloadFileName(fileStem, label, ext));
+        structured.path = saved.path;
+        structured.bytes = saved.bytes;
+        lines.push(
+          `Saved ${saved.path}${saved.renamed ? " (a file with that name already existed, so a numbered name was used)" : ""}.`
+        );
+      }
+      lines.push(`${VIEW_IMAGE_CROP_HINT}.`);
+      const result = ok(lines.join("\n"), structured);
+      if (attach) result.content.push({ type: "image", data, mimeType: res.contentType });
+      return result;
     }
   );
 
