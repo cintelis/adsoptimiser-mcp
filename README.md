@@ -83,7 +83,7 @@ In any chat: *"connect to Ads Optimiser"*. Claude will call `adsoptimiser_connec
 | `adsoptimiser_generate_image` | Generate an image, with a preview of the result; accepts local reference images (`reference_image_paths`), URLs, earlier jobs or a saved `character_id` |
 | `adsoptimiser_generate_video` | Start a video; text-to-video, or image-to-video from a local image (`source_image_path`), URL or earlier job; `character_id` and `script` for talking clips |
 | `adsoptimiser_lip_sync` | Make the person in a finished clip (a job, a URL or a local `video_path`) say a new line in a designed voice, lip-synced by Kling |
-| `adsoptimiser_add_overlays` | Burn timed text cards or captions into a finished video (a job, a URL or a local `video_path`), or captions timed to the speech with `auto_captions` |
+| `adsoptimiser_add_overlays` | Burn timed text cards or captions into any finished video (a job, a URL or a local `video_path`), or captions timed to the speech with `auto_captions`; place text with `y`, `size` and `max_width` |
 | `adsoptimiser_get_job` | Status and result URL of one job, with a preview once it is finished |
 | `adsoptimiser_list_jobs` | Recent jobs, filterable by status and type; previews with `include_thumbnails` |
 | `adsoptimiser_list_pipelines` | Pipeline templates and saved pipelines |
@@ -148,6 +148,8 @@ A pipeline is a small graph of steps (up to 12 nodes): for example refine a prom
 
 Where a graph needs one of your own images (an `input_image` node), give its local path as the node's `image_url` (or `image_path`). The file is checked and uploaded, and the hosted URL is put in its place before the graph is validated, saved or run.
 
+A pipeline can also start from a video you already have, with an `input_video` node ("Your video (library)"). It has no inputs and one `video` output, is free and creates no job, and takes exactly one of `video_job_id` (a ready video job in the workspace) or `video_url` (the workspace's own `/media` URL). With this package you can also give a local .mp4 or .mov, as `video_path` or as a `video_url` that is a file path: it is checked and uploaded the same way. Wire its video into `add_captions`, `add_voiceover`, `strip_audio`, `lip_sync` or `extend_video`. The "Re-caption a video (your video -> captions)" template is this pair: `input_video` then `add_captions`. `adsoptimiser_list_pipelines` marks templates that start from your video; run them as a graph with the `input_video` step filled in. To caption a single finished video, `adsoptimiser_add_overlays` is simpler. On an older deployment the pipeline tools say it doesn't support the input_video node yet.
+
 Validating and saving use no allowance. Running does: each generation step uses allowance like a single job. Pipeline building needs an Ads Optimiser deployment that allows it for API tokens; on an older one these tools say so and templates and saved pipelines still run.
 
 ### Characters and voices
@@ -172,12 +174,28 @@ Each lip-sync uses one video generation from the plan allowance and counts towar
 
 ### Overlays and captions
 
-`adsoptimiser_add_overlays` burns text into a finished video (a video job, an https URL, or a local .mp4 or .mov as `video_path`, uploaded for you). There are two kinds of text, and one request can use both:
+`adsoptimiser_add_overlays` burns text into any finished video (a video job, an https URL, or a local .mp4 or .mov as `video_path`, uploaded for you). It works on a video you already have: there is no need to regenerate it or run a pipeline to caption or re-caption it. There are two kinds of text, and one request can use both:
 
-- **Timed cards and captions (`cues`).** Each cue is `{ text, start, end, position?, style? }`: up to 200 characters shown from `start` to `end` seconds, at the `top`, `center` or `bottom`, as a `caption` line or a bold `card`. Up to 50 cues. Use these for points timed to spoken moments, for example a grade card for each subject as the presenter names it: `{ "text": "Maths: A", "start": 2, "end": 4.5, "style": "card", "position": "center" }`.
+- **Timed cards and captions (`cues`).** Each cue is `{ text, start, end, position?, style?, y?, size?, max_width? }`: up to 200 characters shown from `start` to `end` seconds, at the `top`, `center` or `bottom`, as a `caption` line or a bold `card`. Up to 50 cues. Use these for points timed to spoken moments, for example a grade card for each subject as the presenter names it.
 - **Auto captions (`auto_captions: true`).** The server transcribes the speech and captions every word as it is said, in short chunks (`captions_position`, default `bottom`). If you know the script, pass it as `script`: it corrects the transcript's spellings of names, brands and numbers.
 
-The request is checked on your machine first (one source, at least one cue or auto captions, text lengths, timings and values), so a bad one fails before anything is sent or charged. Rendering counts as one creative job from the plan allowance, not a generation; transcription for auto captions costs about US$0.006 per minute of video. The tool returns a job id at once; follow it with `adsoptimiser_get_job`, which reports the cues, whether captions were added, the transcript's word count and the transcription cost. In a pipeline, the `add_captions` step takes the same `cues` and a `timing` of `speech` for captions timed to the words. On an older Ads Optimiser deployment the tool says overlays aren't supported yet.
+**Placing the text.** Three optional fields fine-tune where a cue sits and how big it is:
+
+- `y`, from 0.05 to 0.95: the vertical centre of the text as a fraction of the frame height (0 is the top). It overrides `position`.
+- `size`: `small`, `medium` or `large` (default `medium` for a caption, `large` for a card).
+- `max_width`, from 0.4 to 1.0: the width of the text block as a fraction of the frame width.
+
+A cue's text may also hold line breaks (`\n`), at most 3 lines. For auto captions, `captions_y` (0.05 to 0.95, overriding `captions_position`) and `captions_size` (`small`, `medium` or `large`) do the same.
+
+In a 9:16 talking clip the face is usually in the upper third, so keep cards below it. A face-safe grade card, on two short lines, sitting just below the middle of the frame:
+
+```json
+{ "text": "Maths\nA+", "start": 2, "end": 4.5, "style": "card", "y": 0.62, "size": "large", "max_width": 0.7 }
+```
+
+`position: "center"` is a simpler face-safe choice when you don't need the exact height.
+
+The request is checked on your machine first (one source, at least one cue or auto captions, text lengths and line counts, timings and every placement value), so a bad one fails before anything is sent or charged. Rendering counts as one creative job from the plan allowance, not a generation; transcription for auto captions costs about US$0.006 per minute of video. The tool returns a job id at once; follow it with `adsoptimiser_get_job`, which reports the cues, whether captions were added, the transcript's word count and the transcription cost. In a pipeline, the `add_captions` step takes the same `cues` (placement fields included, checked on your machine first) and a `timing` of `speech` for captions timed to the words. On an older Ads Optimiser deployment the tool says overlays aren't supported yet, and one that predates placement says it doesn't support cue placement, caption placement or line breaks yet.
 
 ### Working with local files
 

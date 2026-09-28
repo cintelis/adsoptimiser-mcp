@@ -48,6 +48,16 @@ export const MAX_OVERLAY_CUES = 50;
 export const MAX_CUE_TEXT_CHARS = 200;
 export const OVERLAY_POSITIONS = ["top", "center", "bottom"];
 export const OVERLAY_STYLES = ["caption", "card"];
+/** Text sizes (default medium for a caption, large for a card). */
+export const OVERLAY_SIZES = ["small", "medium", "large"];
+/** y: the vertical centre of the text as a fraction of frame height (0 is the top). */
+export const OVERLAY_Y_MIN = 0.05;
+export const OVERLAY_Y_MAX = 0.95;
+/** max_width: the text block's width as a fraction of frame width. */
+export const OVERLAY_MAX_WIDTH_MIN = 0.4;
+export const OVERLAY_MAX_WIDTH_MAX = 1.0;
+/** A cue's text may hold explicit line breaks, at most this many lines. */
+export const MAX_CUE_LINES = 3;
 /** add_captions timing: even (spread across the clip) or speech (transcribed). */
 export const CAPTION_TIMINGS = ["even", "speech"];
 const CUE_FIELDS = {
@@ -56,7 +66,151 @@ const CUE_FIELDS = {
   end: { type: "number" },
   position: { enum: OVERLAY_POSITIONS, optional: true },
   style: { enum: OVERLAY_STYLES, optional: true },
+  y: { type: "number", min: OVERLAY_Y_MIN, max: OVERLAY_Y_MAX, optional: true },
+  size: { enum: OVERLAY_SIZES, optional: true },
+  max_width: { type: "number", min: OVERLAY_MAX_WIDTH_MIN, max: OVERLAY_MAX_WIDTH_MAX, optional: true },
 };
+
+const isNumber = (v) => typeof v === "number" && Number.isFinite(v);
+
+/** A cue's text with Windows line endings made plain \n and each line trimmed. */
+export function normaliseCueText(text) {
+  return String(text)
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => line.trim())
+    .join("\n")
+    .trim();
+}
+
+/** A problem with y (or captions_y), or null. */
+function yProblem(at, value) {
+  if (value === undefined) return null;
+  if (!isNumber(value) || value < OVERLAY_Y_MIN || value > OVERLAY_Y_MAX) {
+    return `${at} must be a number from ${OVERLAY_Y_MIN} to ${OVERLAY_Y_MAX} (the vertical centre as a fraction of frame height, 0 is the top), not ${JSON.stringify(value)}.`;
+  }
+  return null;
+}
+
+/** A problem with size (or captions_size), or null. */
+function sizeProblem(at, value) {
+  if (value === undefined || OVERLAY_SIZES.includes(value)) return null;
+  return `${at} must be ${OVERLAY_SIZES.join(", ")}, not ${JSON.stringify(value)}.`;
+}
+
+/**
+ * Every problem the API would report for a list of timed cues (the overlays
+ * route's cues and the add_captions node's cues param). `prefix` names the
+ * list in messages, for example `cues` or `node "cap" cues`.
+ * @returns {string[]}
+ */
+export function cueListProblems(cueList, prefix = "cues") {
+  const problems = [];
+  if (cueList.length > MAX_OVERLAY_CUES) {
+    problems.push(`At most ${MAX_OVERLAY_CUES} cues in one request (got ${cueList.length}).`);
+  }
+  cueList.forEach((cue, i) => {
+    const at = `${prefix}[${i}]`;
+    if (!cue || typeof cue !== "object" || Array.isArray(cue)) {
+      problems.push(`${at} must be an object { text, start, end, position?, style?, y?, size?, max_width? }.`);
+      return;
+    }
+    const text = typeof cue.text === "string" ? normaliseCueText(cue.text) : null;
+    if (text === null) problems.push(`${at}.text is missing: give the words to show.`);
+    else if (!text) problems.push(`${at}.text is empty.`);
+    else {
+      if (text.length > MAX_CUE_TEXT_CHARS) {
+        problems.push(`${at}.text is ${text.length} characters; at most ${MAX_CUE_TEXT_CHARS}.`);
+      }
+      const lines = text.split("\n").length;
+      if (lines > MAX_CUE_LINES) {
+        problems.push(`${at}.text has ${lines} lines; at most ${MAX_CUE_LINES} (split it into more cues).`);
+      }
+    }
+    const startOk = isNumber(cue.start);
+    const endOk = isNumber(cue.end);
+    if (!startOk) problems.push(`${at}.start must be a number of seconds.`);
+    else if (cue.start < 0) problems.push(`${at}.start is ${cue.start}; it must be 0 or more.`);
+    if (!endOk) problems.push(`${at}.end must be a number of seconds.`);
+    if (startOk && endOk && cue.end <= cue.start) {
+      problems.push(`${at}.end (${cue.end}) must be after start (${cue.start}).`);
+    }
+    if (cue.position !== undefined && !OVERLAY_POSITIONS.includes(cue.position)) {
+      problems.push(`${at}.position must be ${OVERLAY_POSITIONS.join(", ")}, not ${JSON.stringify(cue.position)}.`);
+    }
+    if (cue.style !== undefined && !OVERLAY_STYLES.includes(cue.style)) {
+      problems.push(`${at}.style must be ${OVERLAY_STYLES.join(" or ")}, not ${JSON.stringify(cue.style)}.`);
+    }
+    const y = yProblem(`${at}.y`, cue.y);
+    if (y) problems.push(y);
+    const size = sizeProblem(`${at}.size`, cue.size);
+    if (size) problems.push(size);
+    if (
+      cue.max_width !== undefined &&
+      (!isNumber(cue.max_width) || cue.max_width < OVERLAY_MAX_WIDTH_MIN || cue.max_width > OVERLAY_MAX_WIDTH_MAX)
+    ) {
+      problems.push(
+        `${at}.max_width must be a number from ${OVERLAY_MAX_WIDTH_MIN} to ${OVERLAY_MAX_WIDTH_MAX} (a fraction of frame width), not ${JSON.stringify(cue.max_width)}.`
+      );
+    }
+  });
+  return problems;
+}
+
+/** Problems with the auto captions' placement: captions_y and captions_size. */
+export function captionPlacementProblems(args = {}) {
+  return [yProblem("captions_y", args.captions_y), sizeProblem("captions_size", args.captions_size)].filter(Boolean);
+}
+
+/** A cue as the API takes it: normalised text and only the fields given. */
+export function cueForApi(cue) {
+  const out = { text: normaliseCueText(cue.text), start: cue.start, end: cue.end };
+  for (const key of ["position", "style", "y", "size", "max_width"]) {
+    if (cue[key] !== undefined) out[key] = cue[key];
+  }
+  return out;
+}
+
+/**
+ * The new placement features a request uses: y, size, max_width and
+ * line_breaks from its cues, captions_y and captions_size from `args`.
+ * @returns {Set<string>}
+ */
+export function placementFeaturesUsed(cues, args = {}) {
+  const used = new Set();
+  for (const cue of Array.isArray(cues) ? cues : []) {
+    if (!cue || typeof cue !== "object") continue;
+    for (const key of ["y", "size", "max_width"]) if (cue[key] !== undefined) used.add(key);
+    if (typeof cue.text === "string" && /[\r\n]/.test(cue.text.trim())) used.add("line_breaks");
+  }
+  for (const key of ["captions_y", "captions_size"]) if (args[key] !== undefined) used.add(key);
+  return used;
+}
+
+const REFUSAL_WORDS =
+  /unknown|unrecogni[sz]ed|unexpected|not allowed|not supported|unsupported|additional propert|not permitted|invalid (?:key|field)/i;
+const LINE_BREAK_WORDS = /line break|newline|new line|control char/i;
+
+/**
+ * Which new overlay features an older API refused, judged from its error text
+ * and the features the request used (see placementFeaturesUsed). Returns a
+ * phrase such as "cue placement (y, size and max_width)", or null when the
+ * refusal is about something else.
+ */
+export function refusedPlacementFeature(text, used) {
+  const source = String(text ?? "");
+  const named = (field) => new RegExp(`(^|[^a-z_])${field}([^a-z_]|$)`, "i").test(source);
+  const refused = REFUSAL_WORDS.test(source);
+  const parts = [];
+  if (refused && ["y", "size", "max_width"].some((f) => used.has(f) && named(f))) {
+    parts.push("cue placement (y, size and max_width)");
+  }
+  if (refused && ["captions_y", "captions_size"].some((f) => used.has(f) && named(f))) {
+    parts.push("caption placement (captions_y and captions_size)");
+  }
+  if (used.has("line_breaks") && LINE_BREAK_WORDS.test(source)) parts.push("line breaks in cues");
+  return parts.length ? parts.join(" or ") : null;
+}
 const VOICE_PARAM = {
   type: "object",
   one_of: [
@@ -218,7 +372,19 @@ export const PARAM_SPECS = {
       type: "array",
       max_items: MAX_OVERLAY_CUES,
       items: CUE_FIELDS,
-      description: `Optional timed text: at most ${MAX_OVERLAY_CUES} cues, each { text (1 to ${MAX_CUE_TEXT_CHARS} characters), start, end (seconds from the start of the clip, 0 <= start < end), position? (${OVERLAY_POSITIONS.join(", ")}), style? (${OVERLAY_STYLES.join(", ")}) }. card is a bold title card, caption a subtitle line; use cards for points timed to spoken moments.`,
+      description: `Optional timed text: at most ${MAX_OVERLAY_CUES} cues, each { text (1 to ${MAX_CUE_TEXT_CHARS} characters, at most ${MAX_CUE_LINES} lines split with \\n), start, end (seconds from the start of the clip, 0 <= start < end), position? (${OVERLAY_POSITIONS.join(", ")}), style? (${OVERLAY_STYLES.join(", ")}), y? (${OVERLAY_Y_MIN} to ${OVERLAY_Y_MAX}, the vertical centre as a fraction of frame height, 0 is the top; overrides position), size? (${OVERLAY_SIZES.join(", ")}; default medium for a caption, large for a card), max_width? (${OVERLAY_MAX_WIDTH_MIN} to ${OVERLAY_MAX_WIDTH_MAX} of frame width) }. card is a bold title card, caption a subtitle line; use cards for points timed to spoken moments. In a 9:16 talking clip keep cards out of the upper third (the face), for example y 0.62 or position center.`,
+    },
+  },
+  input_video: {
+    video_job_id: {
+      type: "string",
+      description:
+        "A finished (ready) video job in this workspace, for example from adsoptimiser_list_jobs. Give exactly one of video_job_id or video_url.",
+    },
+    video_url: {
+      type: "string",
+      description:
+        "Or the workspace's own /media URL of a video (for example a media_url from an earlier job or adsoptimiser_upload_file).",
     },
   },
 };
@@ -232,6 +398,10 @@ const LOCAL_PARAM_NOTES = {
     image_url:
       "With this local server, an absolute local file path also works: it is uploaded for you and replaced with its hosted URL.",
   },
+  input_video: {
+    video_url:
+      "With this local server, an absolute local .mp4 or .mov path also works (as video_url or video_path): it is uploaded for you and replaced with its hosted URL.",
+  },
 };
 
 export const GRAPH_RULES = [
@@ -242,16 +412,18 @@ export const GRAPH_RULES = [
   "Each input takes at most its max_connections edges (1 unless stated). One output may feed many inputs (fan-out).",
   "Required inputs other than prompt must be connected.",
   "A prompt input with nothing wired into it uses the run prompt given to adsoptimiser_run_pipeline. When every prompt input is fed by a text or refine_prompt node (or a voice node has a script), no run prompt is needed. Wire one text node to several prompt inputs to share a prompt, or use separate text nodes to give branches different prompts.",
-  "Each generate_image, generate_video, image_to_video, extend_video, voiced_video and lip_sync node is one generation from the plan allowance (video nodes, lip_sync included, also count toward the daily video quota); add_voiceover, strip_audio and add_captions are post-processing creative jobs, never generations; text, input_image, character and refine_prompt are free.",
+  "Each generate_image, generate_video, image_to_video, extend_video, voiced_video and lip_sync node is one generation from the plan allowance (video nodes, lip_sync included, also count toward the daily video quota); add_voiceover, strip_audio and add_captions are post-processing creative jobs, never generations; text, input_image, input_video, character and refine_prompt are free.",
   "A character node (character_id from adsoptimiser_list_characters) feeds a generate_image or voiced_video refs input as ONE connection and fills the free reference slots with its images; it cannot feed image_to_video's image input. Its description is added to that node's prompt and voiced_video uses its default voice when voice_id is omitted.",
   "add_captions burns text into a video: its captions param, else a text node wired into its text input, else the script of the voiced_video (or add_voiceover or lip_sync) it captions.",
-  `add_captions timing: even (omitted) spreads the words across the clip; speech transcribes the clip's speech (whisper-1, about US$0.006 per minute) and shows each chunk as it is spoken, with the captions text or script correcting spellings. Its optional cues param adds timed text: [{"text","start","end","position"?,"style"?}], at most ${MAX_OVERLAY_CUES}, seconds from the start of the clip, style card for a title card timed to a spoken moment. It stays a post-processing creative job, never a generation. Outside a pipeline, adsoptimiser_add_overlays does the same to a finished video.`,
+  `add_captions timing: even (omitted) spreads the words across the clip; speech transcribes the clip's speech (whisper-1, about US$0.006 per minute) and shows each chunk as it is spoken, with the captions text or script correcting spellings. Its optional cues param adds timed text: [{"text","start","end","position"?,"style"?,"y"?,"size"?,"max_width"?}], at most ${MAX_OVERLAY_CUES}, seconds from the start of the clip, style card for a title card timed to a spoken moment. y (${OVERLAY_Y_MIN} to ${OVERLAY_Y_MAX}, 0 is the top) overrides position; size is ${OVERLAY_SIZES.join(", ")}; max_width is ${OVERLAY_MAX_WIDTH_MIN} to ${OVERLAY_MAX_WIDTH_MAX} of the frame width; text may hold \\n line breaks (at most ${MAX_CUE_LINES} lines). In a 9:16 talking clip keep cards out of the upper third, where the face is: y 0.62 or position center. It stays a post-processing creative job, never a generation. Outside a pipeline, adsoptimiser_add_overlays does the same to a finished video.`,
   'add_voiceover voice: its voice param ({"provider":"xai","voice_id"} or {"provider":"openai","voice","instructions"?}, see adsoptimiser_list_voices) or voice_id wins, else the voice of the character the video was made from (a character wired upstream of that video), else eve. OpenAI narration needs a script of at most 4096 characters.',
   "voiced_video (and adsoptimiser_generate_video with a script) only speaks xAI presets: an OpenAI character voice falls back to the character's xai_voice_id, else eve, and the job says so. For a talking clip in an OpenAI (designed) voice with matching mouth movement, use lip_sync.",
   'lip_sync re-animates the mouth in its wired video so the person speaks a line in a designed voice. Script: its script param, else a text node wired into its "script" input, else the run prompt. Voice: its voice ({"provider":"openai","voice","instructions"?} or xai) or voice_id, else the voice of the character upstream of the video, else eve. kling-lipsync (the only model; about US$0.014 per 5s) needs the generating node to set resolution 720p or 1080p and duration 2 to 10; the line must fit the clip (about 15 characters a second, so about 20 words for an 8s clip). The output keeps the new audio, so wire add_captions straight after it (captions default to the script); no strip_audio needed.',
   "Template character-lip-sync, \"Character talking clip (designed voice)\" (pass character_id; the run prompt is the exact line spoken, about 20 words): refine_prompt (scene from the line) > character > generate_image > image_to_video (8s, 720p) > lip_sync > add_captions. About US$0.72 per run in provider costs.",
   "generate_image with gpt-image-2.5-sunburst (follows detailed specs closely: exact colours, counts, layouts) or gpt-image-2.5-flare (fast), where the deployment lists them: quality low, medium (default), high or auto; aspect_ratio 9:16, 16:9 or 1:1 (9:16 is delivered as 2:3, 1024x1536); no resolution. A Grok image step that fails upstream (5xx or timeout) is retried once on gpt-image-2.5-sunburst when the deployment has an OpenAI key.",
   "input_image needs params.image_url: an https URL, or with this local server an absolute local file path, which is uploaded for you.",
+  "input_video (\"Your video (library)\") starts a pipeline from a video you already have: no inputs, output video, free and creates no job. Params: exactly one of video_job_id (a ready video job in this workspace) or video_url (the workspace's own /media URL; with this local server, or video_path, an absolute local .mp4 or .mov path, uploaded for you). Wire its video into add_captions, add_voiceover, strip_audio, lip_sync or extend_video. To caption or re-caption a finished video no new generation is needed: input_video > add_captions, or simply adsoptimiser_add_overlays.",
+  "Template \"Re-caption a video (your video -> captions)\": input_video > add_captions. It needs your video, so build it as a graph with the input_video step's video_job_id or video_url set and pass it to adsoptimiser_run_pipeline as graph (or use adsoptimiser_add_overlays directly).",
   "position is optional editor layout; leave it out.",
 ];
 
@@ -495,6 +667,77 @@ export function localImageRefs(graph) {
     }
   }
   return refs;
+}
+
+const REMOTE_VIDEO = /^https?:\/\//i;
+
+/**
+ * The input_video nodes whose video is a local file: `params.video_path`, or
+ * a `params.video_url` that is not an http(s) URL. A local file with another
+ * source on the same node is a conflict.
+ * @returns {{ node: object, path: string, conflict?: string }[]}
+ */
+export function localVideoRefs(graph) {
+  const refs = [];
+  for (const node of Array.isArray(graph?.nodes) ? graph.nodes : []) {
+    if (node?.type !== "input_video") continue;
+    const params = node.params ?? {};
+    const str = (v) => (typeof v === "string" ? v.trim() : "");
+    const url = str(params.video_url);
+    const path = str(params.video_path);
+    const jobId = str(params.video_job_id);
+    const localUrl = url && !REMOTE_VIDEO.test(url);
+    if (path && url) {
+      refs.push({ node, path, conflict: "video_url and video_path" });
+    } else if ((path || localUrl) && jobId) {
+      refs.push({ node, path: path || url, conflict: `video_job_id and ${path ? "video_path" : "a local video_url"}` });
+    } else if (path) {
+      refs.push({ node, path });
+    } else if (localUrl) {
+      refs.push({ node, path: url });
+    }
+  }
+  return refs;
+}
+
+/**
+ * Local problems with the add_captions nodes' cues, checked with the same
+ * rules as adsoptimiser_add_overlays so a bad graph fails before anything is
+ * uploaded or sent.
+ * @returns {string[]}
+ */
+export function graphCueProblems(graph) {
+  const problems = [];
+  for (const node of Array.isArray(graph?.nodes) ? graph.nodes : []) {
+    if (node?.type !== "add_captions" || node.params?.cues === undefined) continue;
+    const cues = node.params.cues;
+    if (!Array.isArray(cues)) {
+      problems.push(`node "${node.id}" cues must be a list of { text, start, end, position?, style?, y?, size?, max_width? }.`);
+      continue;
+    }
+    problems.push(...cueListProblems(cues, `node "${node.id}" cues`));
+  }
+  return problems;
+}
+
+/**
+ * What an older API's graph errors say it does not support yet, as phrases
+ * for "this Ads Optimiser deployment doesn't support <feature> yet": the
+ * input_video node, and the add_captions cues' placement fields.
+ * @param {{ message: string }[]} errors shaped validator errors
+ */
+export function unsupportedGraphFeatures(errors, graph) {
+  const text = (Array.isArray(errors) ? errors : []).map((e) => e?.message ?? String(e)).join("\n");
+  const features = [];
+  if (/input_video/.test(text) && /unknown|not a known|unsupported|not supported|invalid (?:node )?type/i.test(text)) {
+    features.push('the input_video node ("Your video")');
+  }
+  const cues = (Array.isArray(graph?.nodes) ? graph.nodes : [])
+    .filter((n) => n?.type === "add_captions" && Array.isArray(n.params?.cues))
+    .flatMap((n) => n.params.cues);
+  const placement = refusedPlacementFeature(text, placementFeaturesUsed(cues));
+  if (placement) features.push(placement);
+  return features;
 }
 
 /** A deep copy of the graph with `version: 1` and an `edges` array filled in. */

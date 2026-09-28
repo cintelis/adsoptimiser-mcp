@@ -467,7 +467,10 @@ describe("overlays", () => {
       assert.match(node.params.cues.description, /1 to 200 characters/);
       const text = describeNodeType(node);
       assert.match(text, /timing \(even\|speech\)/);
-      assert.match(text, /cues \(list of \{"text","start","end","position"\?,"style"\?\}, max 50 items\)/);
+      assert.match(
+        text,
+        /cues \(list of \{"text","start","end","position"\?,"style"\?,"y"\?,"size"\?,"max_width"\?\}, max 50 items\)/
+      );
       assert.ok(GRAPH_RULES.some((r) => /add_captions timing/.test(r) && /never a generation/.test(r)));
     });
   });
