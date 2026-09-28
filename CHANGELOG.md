@@ -2,6 +2,19 @@
 
 All notable changes to `@cintelisai/adsoptimiser-mcp` are recorded here. Versions follow [semantic versioning](https://semver.org/).
 
+## 0.7.0 (2026-09-28)
+
+### Added
+
+- `adsoptimiser_view_image`, the same as the hosted connector's `view_image`: one image at a larger size so Claude can check detail (colours, small features, text, the views on a character sheet). Pass exactly one of `job_id`, `key`, or `character_id` with `image_index` (1 to 5); optionally `size` (768, 1024 or 1536 px, default 1024; images are never upscaled) and `crop`, a region `{ x, y, width, height }` given as fractions of the original image (each from 0 to 1, width and height at least 0.05, and x + width and y + height at most 1), applied before scaling so it is a real zoom. The crop is checked locally before anything is sent. The reply is one text block (the source, the returned size, the original size, the crop and a hint on using crop) followed by one `image` block, and the structured content carries `source`, `width`, `height`, `original_width`, `original_height`, `crop`, `size` and `mime_type`. It uses `GET /api/v1/media/thumbnail` and uses no allowance.
+- A character's reference image is found the same way `adsoptimiser_get_character` previews it: by its key when it is stored on this Ads Optimiser deployment, else by the job it came from. An image hosted elsewhere with no job is named as an external URL and never fetched.
+- One image may be at most 2,000,000 base64 bytes. A larger one is fetched once more at the next smaller size, and the reply says so; if it is still too large, the reply says it was not attached and suggests a crop.
+- Only in this package: `save_to`, a local folder where the returned image is also saved, named `view-<job id, key or character and index>-<width>x<height>` (with `-crop` for a crop). Existing files are never replaced (a numbered name is used instead), and folder paths containing `..` are refused before anything is fetched.
+
+### Changed
+
+- Clear messages when an image can't be viewed: not found, a job not finished yet, not an image, a refused crop, a video with no poster frame, or a deployment that can't resize images right now. On a deployment that predates `adsoptimiser_view_image` (it refuses the larger sizes, refuses the route to tokens, or has no such route) the reply says the deployment doesn't support view_image yet and that previews in other tools are 384px.
+
 ## 0.6.0 (2026-09-28)
 
 ### Added

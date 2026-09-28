@@ -110,6 +110,12 @@ describe("bundled server (dist/server.mjs)", () => {
       for (const name of ["adsoptimiser_get_job", "adsoptimiser_generate_image", "adsoptimiser_list_jobs", "adsoptimiser_get_character"]) {
         assert.ok(tools.find((t) => t.name === name).inputSchema.properties.include_thumbnails, `${name} takes include_thumbnails`);
       }
+      const view = tools.find((t) => t.name === "adsoptimiser_view_image");
+      assert.equal(view.inputSchema.required, undefined, "view_image takes one of several sources");
+      for (const field of ["job_id", "key", "character_id", "image_index", "size", "crop", "save_to"]) {
+        assert.ok(view.inputSchema.properties[field], `view_image takes ${field}`);
+      }
+      assert.ok(JSON.stringify(view.inputSchema.properties.size).includes("1536"), "view_image offers 1536px");
     });
 
     it("answers a tool call", async () => {
