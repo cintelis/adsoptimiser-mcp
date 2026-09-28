@@ -2,6 +2,20 @@
 
 All notable changes to `@cintelisai/adsoptimiser-mcp` are recorded here. Versions follow [semantic versioning](https://semver.org/).
 
+## 0.8.0 (2026-09-28)
+
+### Added
+
+- **OpenAI GPT Image 2.5 models**, the same as the hosted connector: `adsoptimiser_generate_image` takes `gpt-image-2.5-sunburst` (precise: follows detailed specs such as exact colours, counts, character sheets and thumbnail layouts closely) and `gpt-image-2.5-flare` (fast) where the deployment offers them (see `adsoptimiser_list_models`). `quality` gains `high`, for the OpenAI models only (they take low, medium, high or auto and default to medium). They take `aspect_ratio` 1:1, 2:3, 9:16, 3:2, 16:9 or auto (9:16 is delivered as 2:3 at 1024x1536, 16:9 as 3:2 at 1536x1024), no `resolution`, and up to 5 reference images. `adsoptimiser_batch_generate` passes the same `model` and `quality` through.
+- **Grok to OpenAI fallback in job summaries.** When Grok fails upstream (5xx or a timeout) the deployment retries an image once on GPT Image 2.5 Sunburst. `adsoptimiser_get_job` (and `adsoptimiser_generate_image`) then say so, as the connector does: "Generated with GPT Image 2.5 Sunburst after Grok failed (500)." for a ready job, or "Grok timed out; retried once on GPT Image 2.5 Sunburst." for a failed one, with `fallback_note` and `fallback` (`from`, `to`, `reason`) in the structured content. The job's `model` is the model that actually made the image.
+- Only in this package: a job made by OpenAI shows its provider cost ("Provider cost: US$0.0114 (openai).", with `provider_cost_usd` and `provider` in the structured content), and `adsoptimiser_list_jobs` marks jobs made by the fallback.
+- The pipeline node catalogue passes the new `generate_image` model and quality values through from the API, the local descriptions cover them for older catalogues, and a graph rule explains the OpenAI models and the fallback.
+
+### Changed
+
+- Only in this package: image options the API is known to refuse are checked before anything is sent or charged, in `adsoptimiser_generate_image` and `adsoptimiser_batch_generate`: an aspect ratio GPT Image 2.5 cannot deliver (the message suggests 9:16, delivered as 2:3), a `resolution` on an OpenAI model, `quality` high on a Grok model, and `quality` on `grok-imagine-image` or a Luma model. A model this package does not know is left for the API to judge.
+- Clear messages for the new API refusals: OpenAI image models not configured on the deployment (503 `openai_images_not_configured`; nothing is charged, use a Grok model), an unknown image model (now a 400; the reply points to `adsoptimiser_list_models`), and an aspect ratio refused for an OpenAI model (with the "9:16 is delivered as 2:3" hint).
+
 ## 0.7.0 (2026-09-28)
 
 ### Added

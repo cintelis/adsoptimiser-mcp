@@ -106,6 +106,23 @@ In any chat: *"connect to Ads Optimiser"*. Claude will call `adsoptimiser_connec
 
 Every generation uses your workspace's monthly plan allowance, exactly as in the app. When the allowance runs out, the tools say so and link to **Billing** (`https://app.adsoptimiser.com.au/#/billing`) where you can upgrade. Videos also count toward a daily video quota.
 
+### Image models
+
+`adsoptimiser_generate_image` (and `adsoptimiser_batch_generate`, and a pipeline's `generate_image` step) takes a `model`. `adsoptimiser_list_models` shows what your deployment offers, with sizes and indicative cost.
+
+| Model | Id | Good for | Options |
+| --- | --- | --- | --- |
+| Grok Image 2.0 (default) | `grok-imagine-image-2.0` | General ad images | `quality` low (fastest, about 13s), medium or auto (45 to 50s); `resolution` 1k or 2k; wide ratios such as 21:9 |
+| Grok Image | `grok-imagine-image` | The fastest Grok images | No `quality` |
+| GPT Image 2.5 Sunburst (precise, fast) | `gpt-image-2.5-sunburst` | Detailed specs followed exactly, in about 12 seconds | `quality` low, medium (default), high or auto |
+| GPT Image 2.5 Flare (fast) | `gpt-image-2.5-flare` | Quick drafts in about 9 seconds, less precise on detail | `quality` low, medium (default), high or auto |
+
+**When to pick Sunburst:** when the image has to match a detailed brief. For example exact colours ("four buttons: green, teal, amber, coral"), exact counts of objects, a character sheet (the same person from set angles, a full-body shot and a close-up), or a thumbnail with layout constraints (a title in the top third, the face on the right, room left for a logo). Grok suits open-ended scenes; Sunburst is the one to use when the details matter.
+
+The GPT Image 2.5 models are OpenAI models, offered only where the deployment has an OpenAI key (otherwise the tools say so and suggest a Grok model). They take `aspect_ratio` 1:1 (1024x1024), 2:3 or 9:16 (both delivered at 1024x1536), 3:2 or 16:9 (both delivered at 1536x1024), or auto. Any other ratio, and any `resolution`, is refused on your machine before anything is sent, as is `quality` high on a Grok model. Up to 5 reference images work with them, the same as Grok, as does `character_id`. A finished job made by OpenAI shows its provider cost (about US$0.011 at medium quality). Each image uses one image generation from the plan allowance, whichever model makes it.
+
+**Automatic fallback.** When Grok fails upstream (a 5xx error or a timeout) the deployment retries the image once on GPT Image 2.5 Sunburst, with the same prompt and references. It never retries a refused request or a moderation block, and the retry still counts as one generation. The job's `model` is then the model that made the image, and `adsoptimiser_get_job` says what happened, for example "Generated with GPT Image 2.5 Sunburst after Grok failed (500)", or for a job that failed both ways "Grok timed out; retried once on GPT Image 2.5 Sunburst". `adsoptimiser_list_jobs` marks these jobs too.
+
 ### Previews: Claude can see the images
 
 Tools attach small preview images (384 px) to their results, so Claude can look at what was generated instead of working from URLs alone: check a new image, pick the best shots of a character sheet, or compare recent results. The `include_thumbnails` flag controls this per call:

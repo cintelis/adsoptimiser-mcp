@@ -69,11 +69,16 @@ export const PARAM_SPECS = {
     },
   },
   generate_image: {
-    model: { type: "string", description: "Defaults to grok-imagine-image-2.0." },
+    model: {
+      type: "string",
+      description:
+        "Defaults to grok-imagine-image-2.0. gpt-image-2.5-sunburst (precise) and gpt-image-2.5-flare (fast) where the deployment offers them.",
+    },
     aspect_ratio: { type: "string", description: "9:16 is TikTok vertical." },
     quality: {
       type: "string",
-      description: "grok-imagine-image-2.0 only; defaults to low. medium is several times slower.",
+      description:
+        "grok-imagine-image-2.0: low (default), medium or auto; low is fastest. OpenAI models: low, medium (default), high or auto.",
     },
   },
   generate_video: {
@@ -217,6 +222,7 @@ export const GRAPH_RULES = [
   "voiced_video (and adsoptimiser_generate_video with a script) only speaks xAI presets: an OpenAI character voice falls back to the character's xai_voice_id, else eve, and the job says so. For a talking clip in an OpenAI (designed) voice with matching mouth movement, use lip_sync.",
   'lip_sync re-animates the mouth in its wired video so the person speaks a line in a designed voice. Script: its script param, else a text node wired into its "script" input, else the run prompt. Voice: its voice ({"provider":"openai","voice","instructions"?} or xai) or voice_id, else the voice of the character upstream of the video, else eve. kling-lipsync (the only model; about US$0.014 per 5s) needs the generating node to set resolution 720p or 1080p and duration 2 to 10; the line must fit the clip (about 15 characters a second, so about 20 words for an 8s clip). The output keeps the new audio, so wire add_captions straight after it (captions default to the script); no strip_audio needed.',
   "Template character-lip-sync, \"Character talking clip (designed voice)\" (pass character_id; the run prompt is the exact line spoken, about 20 words): refine_prompt (scene from the line) > character > generate_image > image_to_video (8s, 720p) > lip_sync > add_captions. About US$0.72 per run in provider costs.",
+  "generate_image with gpt-image-2.5-sunburst (follows detailed specs closely: exact colours, counts, layouts) or gpt-image-2.5-flare (fast), where the deployment lists them: quality low, medium (default), high or auto; aspect_ratio 9:16, 16:9 or 1:1 (9:16 is delivered as 2:3, 1024x1536); no resolution. A Grok image step that fails upstream (5xx or timeout) is retried once on gpt-image-2.5-sunburst when the deployment has an OpenAI key.",
   "input_image needs params.image_url: an https URL, or with this local server an absolute local file path, which is uploaded for you.",
   "position is optional editor layout; leave it out.",
 ];
