@@ -80,11 +80,11 @@ In any chat: *"connect to Ads Optimiser"*. Claude will call `adsoptimiser_connec
 | `adsoptimiser_disconnect` | Revoke the token on the server and delete it from this machine |
 | `adsoptimiser_list_models` | List image and video models, their options and indicative cost |
 | `adsoptimiser_enhance_prompt` | Expand a rough idea into a detailed ad prompt (uses no allowance) |
-| `adsoptimiser_generate_image` | Generate an image; accepts local reference images (`reference_image_paths`), URLs, earlier jobs or a saved `character_id` |
+| `adsoptimiser_generate_image` | Generate an image, with a preview of the result; accepts local reference images (`reference_image_paths`), URLs, earlier jobs or a saved `character_id` |
 | `adsoptimiser_generate_video` | Start a video; text-to-video, or image-to-video from a local image (`source_image_path`), URL or earlier job; `character_id` and `script` for talking clips |
 | `adsoptimiser_lip_sync` | Make the person in a finished clip (a job, a URL or a local `video_path`) say a new line in a designed voice, lip-synced by Kling |
-| `adsoptimiser_get_job` | Status and result URL of one job |
-| `adsoptimiser_list_jobs` | Recent jobs, filterable by status and type |
+| `adsoptimiser_get_job` | Status and result URL of one job, with a preview once it is finished |
+| `adsoptimiser_list_jobs` | Recent jobs, filterable by status and type; previews with `include_thumbnails` |
 | `adsoptimiser_list_pipelines` | Pipeline templates and saved pipelines |
 | `adsoptimiser_get_pipeline_nodes` | The pipeline node catalogue: node types, inputs, outputs, params, graph rules and an example |
 | `adsoptimiser_get_pipeline` | A saved pipeline's graph, node count and estimated cost per run |
@@ -93,8 +93,8 @@ In any chat: *"connect to Ads Optimiser"*. Claude will call `adsoptimiser_connec
 | `adsoptimiser_run_pipeline` | Start a pipeline run from a template, a saved pipeline or an inline graph, optionally with a `character_id` |
 | `adsoptimiser_get_pipeline_run` | Status and results of each pipeline step |
 | `adsoptimiser_list_characters` | Saved characters with their images, description, style and voice |
-| `adsoptimiser_get_character` | One character with every reference image and the job it came from, plus counts of what was made with it, the latest items and the latest voice previews |
-| `adsoptimiser_list_character_assets` | Everything made with a character, filterable by type and paged; with `download_to` the finished files and speech mp3s are saved locally |
+| `adsoptimiser_get_character` | One character with every reference image (previewed) and the job it came from, plus counts of what was made with it, the latest items and the latest voice previews |
+| `adsoptimiser_list_character_assets` | Everything made with a character, filterable by type and paged; previews with `include_thumbnails`; with `download_to` the finished files and speech mp3s are saved locally |
 | `adsoptimiser_create_character` | Save a character from 1 to 5 images: local files (`image_paths`), URLs or finished jobs, with an optional voice (uses no allowance) |
 | `adsoptimiser_update_character` | Change a character's name, description, style, voice or images (uses no allowance) |
 | `adsoptimiser_list_voices` | xAI preset voices and OpenAI voices, and whether OpenAI voices are available |
@@ -104,6 +104,22 @@ In any chat: *"connect to Ads Optimiser"*. Claude will call `adsoptimiser_connec
 | `adsoptimiser_batch_generate` | One job per image in a folder (image-to-video or image edit) or per line of a prompts file, up to 10 per call |
 
 Every generation uses your workspace's monthly plan allowance, exactly as in the app. When the allowance runs out, the tools say so and link to **Billing** (`https://app.adsoptimiser.com.au/#/billing`) where you can upgrade. Videos also count toward a daily video quota.
+
+### Previews: Claude can see the images
+
+Tools attach small preview images (384 px) to their results, so Claude can look at what was generated instead of working from URLs alone: check a new image, pick the best shots of a character sheet, or compare recent results. The `include_thumbnails` flag controls this per call:
+
+| Tool | Previews | Default |
+| --- | --- | --- |
+| `adsoptimiser_generate_image` | the finished image, when it is ready in time | on |
+| `adsoptimiser_get_job` | the finished image, or a video's poster frame | on |
+| `adsoptimiser_get_character` | up to 5 reference images | on |
+| `adsoptimiser_list_jobs` | up to 6 finished jobs | off |
+| `adsoptimiser_list_character_assets` | up to 6 finished images on the page | off |
+
+To keep results small, each preview is at most 600,000 bytes (base64) and one result carries at most 1,500,000 bytes of images; anything over is left out and named in the reply. Videos are previewed only when a poster frame is stored. Reference images hosted elsewhere are not previewed. A preview that fails never fails the tool: the reply says what was not previewed and why. On an Ads Optimiser deployment that predates previews, the reply says the deployment doesn't serve previews yet. Previews use no allowance.
+
+Claude Code limits how large a tool result may be (the `MAX_MCP_OUTPUT_TOKENS` setting). If a result with several previews is cut off or refused, ask Claude to call the tool with `include_thumbnails` set to `false`, or raise that limit.
 
 ### Building pipelines
 
@@ -174,6 +190,7 @@ Use **this package** when you want Claude to work with local files: upload produ
 - Tokens are per machine and individually revocable: each appears in the app under **Profile > API tokens**, where you can revoke it. `adsoptimiser_disconnect` revokes it on the server and deletes the local copy. If a token is revoked elsewhere, the next tool call deletes the local copy and asks you to reconnect; if you lose access to the workspace, the tools tell you to reconnect to another one.
 - Uploaded files are stored by Ads Optimiser under unguessable URLs so the generation models can read them. Do not upload anything you would not put in an ad.
 - Media downloads fetch the public media URL directly; the token is not sent with them.
+- Previews are fetched from the Ads Optimiser API (`/api/v1/media/thumbnail`) with the token, like every other API call. Nothing is fetched from another host, and the token is only ever sent to the API host.
 
 ## Releasing
 

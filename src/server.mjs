@@ -47,6 +47,13 @@ import {
   normaliseGraph,
   shapeErrors,
 } from "./pipeline.mjs";
+import {
+  THUMBNAIL_LIMITS,
+  THUMBNAIL_SIZE,
+  attachThumbnails,
+  characterThumbnails,
+  jobThumbnail,
+} from "./thumbnails.mjs";
 
 /* global __ADSOPTIMISER_VERSION__ */
 // The bundle (dist/server.mjs) has the version baked in at build time; running
@@ -84,6 +91,7 @@ export const TOOL_ROUTES = {
     "POST /api/v1/jobs/source-media",
     "POST /api/v1/jobs",
     "GET /api/v1/jobs/:id",
+    "GET /api/v1/media/thumbnail",
   ],
   adsoptimiser_generate_video: ["POST /api/v1/jobs/source-media", "POST /api/v1/jobs"],
   adsoptimiser_lip_sync: [
@@ -91,8 +99,8 @@ export const TOOL_ROUTES = {
     "GET /api/v1/jobs/:id",
     "POST /api/v1/jobs/lip-sync",
   ],
-  adsoptimiser_get_job: ["GET /api/v1/jobs/:id"],
-  adsoptimiser_list_jobs: ["GET /api/v1/jobs"],
+  adsoptimiser_get_job: ["GET /api/v1/jobs/:id", "GET /api/v1/media/thumbnail"],
+  adsoptimiser_list_jobs: ["GET /api/v1/jobs", "GET /api/v1/media/thumbnail"],
   adsoptimiser_list_pipelines: ["GET /api/v1/pipelines/templates", "GET /api/v1/pipelines/graphs"],
   adsoptimiser_run_pipeline: [
     "POST /api/v1/jobs/source-media",
@@ -119,12 +127,14 @@ export const TOOL_ROUTES = {
     "GET /api/v1/characters/:character_id",
     "GET /api/v1/characters/:character_id/assets",
     "GET /api/v1/characters/:character_id/voice-previews",
+    "GET /api/v1/media/thumbnail",
   ],
   adsoptimiser_list_character_assets: [
     "GET /api/v1/characters/:character_id/assets",
     // Only after a 404, to tell an unknown character from an older deployment.
     "GET /api/v1/characters/:character_id",
     "GET /media/:key",
+    "GET /api/v1/media/thumbnail",
   ],
   adsoptimiser_create_character: ["POST /api/v1/jobs/source-media", "POST /api/v1/characters"],
   adsoptimiser_update_character: [
@@ -158,6 +168,16 @@ const characterId = jobId.describe(
   "A character id from adsoptimiser_list_characters or adsoptimiser_create_character."
 );
 const voiceId = z.string().regex(/^[a-z0-9_-]{1,64}$/, "Invalid voice id");
+
+/** The connector's include_thumbnails flag, with the same wording. */
+function includeThumbnails(defaultValue, what) {
+  return z
+    .boolean()
+    .optional()
+    .describe(
+      `Attach small preview images (${THUMBNAIL_SIZE}px JPEG) of ${what} so you can see them. Default ${defaultValue}.`
+    );
+}
 
 export const voiceProfileSchema = z
   .discriminatedUnion("provider", [
@@ -341,6 +361,7 @@ export const schemas = {
       .boolean()
       .optional()
       .describe("Wait briefly for the finished image (default true). false returns the job id at once."),
+    include_thumbnails: includeThumbnails(true, "the finished image, when it is ready in time"),
   }),
   generate_video: z.object({
     prompt: z.string().trim().min(1).max(4000).describe("What should happen in the video."),
@@ -416,12 +437,19 @@ export const schemas = {
       .optional()
       .describe("Lip-sync model: kling-lipsync (the default, about US$0.014 per 5 seconds)."),
   }),
-  get_job: z.object({ job_id: jobId }),
+  get_job: z.object({
+    job_id: jobId,
+    include_thumbnails: includeThumbnails(true, "the finished image (or a video's poster frame)"),
+  }),
   list_jobs: z.object({
     status: z.enum(["queued", "generating", "ready", "failed", "expired"]).optional(),
     asset_type: z.enum(["image", "video"]).optional(),
     limit: z.number().int().min(1).max(50).optional().describe("Default 10."),
     offset: z.number().int().min(0).max(10_000).optional(),
+    include_thumbnails: includeThumbnails(
+      false,
+      `up to ${THUMBNAIL_LIMITS.list_jobs} finished jobs (images, and videos with a poster frame)`
+    ),
   }),
   list_pipelines: z.object({}),
   run_pipeline: z.object({
@@ -463,7 +491,13 @@ export const schemas = {
       .describe("Update this saved pipeline instead of creating a new one."),
   }),
   list_characters: z.object({}),
-  get_character: z.object({ character_id: characterId }),
+  get_character: z.object({
+    character_id: characterId,
+    include_thumbnails: includeThumbnails(
+      true,
+      `the character's reference images (up to ${THUMBNAIL_LIMITS.get_character})`
+    ),
+  }),
   list_character_assets: z.object({
     character_id: characterId,
     type: z
@@ -485,6 +519,10 @@ export const schemas = {
       .describe(
         `Also save the listed finished assets (images, videos and kept speech mp3s) in this local folder (created if missing), at most ${MAX_CHARACTER_DOWNLOADS} files per call. Use "" for the default ./adsoptimiser-output (or ADSOPTIMISER_OUTPUT_DIR). Existing files are never replaced.`
       ),
+    include_thumbnails: includeThumbnails(
+      false,
+      `up to ${THUMBNAIL_LIMITS.list_character_assets} finished images on this page (videos are not previewed)`
+    ),
   }),
   create_character: z.object({
     name: z.string().trim().min(1).max(80).describe("Display name, e.g. Amos."),
@@ -1246,7 +1284,7 @@ export function createServer(options = {}) {
   tool(
     "adsoptimiser_generate_image",
     "Generate an image",
-    "Generate an ad image with Grok (or Luma where enabled). Uses one image generation from the workspace's monthly plan allowance. Usually returns the finished image URL; if it takes longer, returns the job id to check with adsoptimiser_get_job. To edit or restyle existing images pass reference_image_paths (local files, uploaded for you), reference_image_urls or reference_job_ids. For an AI influencer, first generate a character sheet (the same person from several angles, a full-body shot and a close-up, neutral white background, realistic unretouched skin), save the best shots with adsoptimiser_create_character, then pass character_id to place that person in new scenes (porch, kitchen, garden...).",
+    "Generate an ad image with Grok (or Luma where enabled). Uses one image generation from the workspace's monthly plan allowance. Usually returns the finished image URL with a small preview so you can check it; if it takes longer, returns the job id to check with adsoptimiser_get_job. To edit or restyle existing images pass reference_image_paths (local files, uploaded for you), reference_image_urls or reference_job_ids. For an AI influencer, first generate a character sheet (the same person from several angles, a full-body shot and a close-up, neutral white background, realistic unretouched skin), save the best shots with adsoptimiser_create_character, then pass character_id to place that person in new scenes (porch, kitchen, garden...).",
     schemas.generate_image,
     { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     async (args) => {
@@ -1289,7 +1327,10 @@ export function createServer(options = {}) {
         job.status === "ready"
           ? "\nSave it locally with adsoptimiser_download_job."
           : "\nStill generating. Call adsoptimiser_get_job with this job id in a few seconds.";
-      return ok(describeJob(summary) + tail, summary);
+      const result = ok(describeJob(summary) + tail, summary);
+      const preview = args.include_thumbnails === false ? {} : jobThumbnail(job);
+      if (!preview.target) return result;
+      return attachThumbnails(api, result, [preview.target], THUMBNAIL_LIMITS.generate_image);
     }
   );
 
@@ -1427,19 +1468,29 @@ export function createServer(options = {}) {
   tool(
     "adsoptimiser_get_job",
     "Get a creative job",
-    "Get the status of an image or video job, with the result URL once it is ready (statuses: queued, generating, ready, failed, expired).",
+    "Get the status of an image or video job, with the result URL once it is ready (statuses: queued, generating, ready, failed, expired). A finished image (or a video with a stored poster frame) comes with a small preview image so you can see it.",
     schemas.get_job,
     { readOnlyHint: true, openWorldHint: false },
-    async ({ job_id }) => {
-      const summary = summarizeJob(await getJob(job_id));
-      return ok(describeJob(summary), summary);
+    async ({ job_id, include_thumbnails }) => {
+      const job = await getJob(job_id);
+      const summary = summarizeJob(job);
+      const result = ok(describeJob(summary), summary);
+      if (include_thumbnails === false) return result;
+      const preview = jobThumbnail(job);
+      return attachThumbnails(
+        api,
+        result,
+        preview.target ? [preview.target] : [],
+        THUMBNAIL_LIMITS.get_job,
+        preview.note ? [preview.note] : []
+      );
     }
   );
 
   tool(
     "adsoptimiser_list_jobs",
     "List recent creative jobs",
-    "List recent image and video jobs in the workspace, newest first. Filter by status or asset type.",
+    `List recent image and video jobs in the workspace, newest first. Filter by status or asset type. Pass include_thumbnails to see small previews of up to ${THUMBNAIL_LIMITS.list_jobs} finished jobs, e.g. to pick the best results.`,
     schemas.list_jobs,
     { readOnlyHint: true, openWorldHint: false },
     async (args) => {
@@ -1454,10 +1505,22 @@ export function createServer(options = {}) {
           `- ${j.job_id} ${j.lip_sync ? "lip-sync video" : j.asset_type} ${j.status}${j.media_url ? ` ${j.media_url}` : ""} "${String(j.prompt ?? "").slice(0, 80)}"`
       );
       const total = result.total ?? jobs.length;
-      return ok(`${total} job(s) in total; showing ${jobs.length}.\n${lines.join("\n")}`, {
+      const listed = ok(`${total} job(s) in total; showing ${jobs.length}.\n${lines.join("\n")}`, {
         jobs,
         total,
       });
+      if (!args.include_thumbnails) return listed;
+      const previews = (result.jobs ?? []).map(jobThumbnail);
+      const videosWithout = previews.filter((p) => p.note).length;
+      return attachThumbnails(
+        api,
+        listed,
+        previews.flatMap((p) => (p.target ? [p.target] : [])),
+        THUMBNAIL_LIMITS.list_jobs,
+        videosWithout
+          ? [`${videosWithout} video(s) without a poster frame (videos are not previewed otherwise)`]
+          : []
+      );
     }
   );
 
@@ -1768,10 +1831,10 @@ export function createServer(options = {}) {
   tool(
     "adsoptimiser_get_character",
     "Get a character",
-    "Get one saved character with every reference image URL (and the job each came from), its description, style and default voice, plus a summary of everything made with it: counts per kind, the latest items (with any kept speech audio) and the latest voice previews. Use adsoptimiser_list_character_assets for the full gallery, and its download_to to save files locally.",
+    "Get one saved character with every reference image URL (and the job each came from), its description, style and default voice, plus a summary of everything made with it: counts per kind, the latest items (with any kept speech audio) and the latest voice previews. Use adsoptimiser_list_character_assets for the full gallery, and its download_to to save files locally. Small previews of the reference images are attached so you can see the character.",
     schemas.get_character,
     { readOnlyHint: true, openWorldHint: false },
-    async ({ character_id }) => {
+    async ({ character_id, include_thumbnails }) => {
       const path = `/api/v1/characters/${encodeURIComponent(character_id)}`;
       const character = await api.request("GET", path);
       const summary = summarizeCharacter(character);
@@ -1829,7 +1892,10 @@ export function createServer(options = {}) {
           "To save audio locally: kept speech with adsoptimiser_list_character_assets and download_to; a voice preview with adsoptimiser_preview_voice, the same voice and text, and save_to (repeats are served from cache and use no allowance)."
         );
       }
-      return ok(lines.join("\n"), structured);
+      const result = ok(lines.join("\n"), structured);
+      if (include_thumbnails === false) return result;
+      const { targets, notes } = characterThumbnails(baseUrl, summary.images);
+      return attachThumbnails(api, result, targets, THUMBNAIL_LIMITS.get_character, notes);
     }
   );
 
@@ -1892,11 +1958,11 @@ export function createServer(options = {}) {
   tool(
     "adsoptimiser_list_character_assets",
     "List a character's assets",
-    `List everything made with a saved character, newest first: images, videos, talking clips, lip-syncs, voiceovers and captioned clips, with result URLs, the kept speech audio (speech_url) and the line spoken (script) where there is one. Filter by type and page with cursor. Only in this package: with download_to, the listed finished files (media and speech mp3s) are also saved to that local folder, at most ${MAX_CHARACTER_DOWNLOADS} per call, and existing files are never replaced.`,
+    `List everything made with a saved character, newest first: images, videos, talking clips, lip-syncs, voiceovers and captioned clips, with result URLs, the kept speech audio (speech_url) and the line spoken (script) where there is one. Filter by type and page with cursor. Pass include_thumbnails to see small previews of up to ${THUMBNAIL_LIMITS.list_character_assets} finished images on the page. Only in this package: with download_to, the listed finished files (media and speech mp3s) are also saved to that local folder, at most ${MAX_CHARACTER_DOWNLOADS} per call, and existing files are never replaced.`,
     schemas.list_character_assets,
     // Not read-only: download_to writes local files.
     { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    async ({ character_id, type, cursor, limit, download_to }) => {
+    async ({ character_id, type, cursor, limit, download_to, include_thumbnails }) => {
       // Refuse a bad folder before calling the API.
       const folder = download_to !== undefined ? resolveOutputFolder(download_to, config.output) : null;
       const path = `/api/v1/characters/${encodeURIComponent(character_id)}`;
@@ -1964,7 +2030,19 @@ export function createServer(options = {}) {
           );
         }
       }
-      return ok(lines.join("\n"), structured);
+      const listed = ok(lines.join("\n"), structured);
+      if (!include_thumbnails) return listed;
+      const imageItems = (page.items ?? []).filter(
+        (item) => item.asset_type === "image" && item.status === "ready"
+      );
+      const others = (page.items ?? []).length - imageItems.length;
+      return attachThumbnails(
+        api,
+        listed,
+        imageItems.map((item) => ({ label: `job ${item.job_id}`, job_id: item.job_id })),
+        THUMBNAIL_LIMITS.list_character_assets,
+        others ? [`${others} video or unfinished item(s) (only finished images are previewed)`] : []
+      );
     }
   );
 

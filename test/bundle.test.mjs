@@ -5,13 +5,14 @@
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { builtinModules } from "node:module";
-import { copyFileSync, existsSync, readFileSync } from "node:fs";
+import { copyFileSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { cachePathFor } from "../src/api.mjs";
 import { TOOL_ROUTES } from "../src/server.mjs";
-import { startStub, tempDir } from "./helpers.mjs";
+import { TOKEN, startStub, tempDir } from "./helpers.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const BUNDLE = join(ROOT, "dist", "server.mjs");
@@ -105,11 +106,37 @@ describe("bundled server (dist/server.mjs)", () => {
       }
       const video = tools.find((t) => t.name === "adsoptimiser_generate_video");
       assert.ok(video.inputSchema.properties.character_id && video.inputSchema.properties.script);
+      assert.ok(assets.inputSchema.properties.include_thumbnails, "list_character_assets takes include_thumbnails");
+      for (const name of ["adsoptimiser_get_job", "adsoptimiser_generate_image", "adsoptimiser_list_jobs", "adsoptimiser_get_character"]) {
+        assert.ok(tools.find((t) => t.name === name).inputSchema.properties.include_thumbnails, `${name} takes include_thumbnails`);
+      }
     });
 
     it("answers a tool call", async () => {
       const status = await client.callTool({ name: "adsoptimiser_status", arguments: {} });
       assert.match(status.content[0].text, /Not connected/);
+    });
+
+    it("attaches a preview image to get_job", async () => {
+      const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 9, 9, 0xff, 0xd9]);
+      stub.setHandler((r) => {
+        if (r.path === "/api/v1/jobs/job_img") {
+          return { json: { job_id: "job_img", asset_type: "image", status: "ready", storage_uri: "images/job_img.png" } };
+        }
+        if (r.path === "/api/v1/media/thumbnail") return { headers: { "content-type": "image/jpeg" }, body: jpeg };
+        return undefined;
+      });
+      writeFileSync(cachePathFor(stub.url, home.dir), JSON.stringify({ token: TOKEN }));
+      try {
+        const res = await client.callTool({ name: "adsoptimiser_get_job", arguments: { job_id: "job_img" } });
+        assert.equal(res.isError, undefined);
+        assert.deepEqual(res.content.map((c) => c.type), ["text", "text", "image"]);
+        assert.deepEqual(res.content[2], { type: "image", data: jpeg.toString("base64"), mimeType: "image/jpeg" });
+        const thumb = stub.requests.find((r) => r.path === "/api/v1/media/thumbnail");
+        assert.equal(thumb.headers.authorization, `Bearer ${TOKEN}`);
+      } finally {
+        rmSync(cachePathFor(stub.url, home.dir), { force: true });
+      }
     });
   });
 });

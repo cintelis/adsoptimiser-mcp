@@ -119,8 +119,53 @@ export class ApiClient {
    * @param {{ json?: unknown, form?: FormData, auth?: boolean, timeoutMs?: number }} [options]
    */
   async request(method, path, options = {}) {
+    const res = await this.send(method, path, options, "application/json");
+    const parsed = parseJsonObject(await res.text().catch(() => ""));
+    if (!res.ok) throw this.toError(res.status, parsed, options.auth ?? true);
+    return parsed ?? {};
+  }
+
+  /**
+   * GET a binary answer (a preview image) from this API. The token goes to
+   * the API host only, as for request(). Errors are read as JSON like
+   * request(). Returns { bytes: Buffer, contentType, headers }.
+   *
+   * @param {string} path
+   * @param {{ timeoutMs?: number }} [options]
+   */
+  async requestBinary(path, options = {}) {
+    const res = await this.send("GET", path, options, "image/*, application/json");
+    if (!res.ok) {
+      throw this.toError(res.status, parseJsonObject(await res.text().catch(() => "")), true);
+    }
+    return {
+      bytes: Buffer.from(await res.arrayBuffer()),
+      contentType: (res.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase(),
+      headers: res.headers,
+    };
+  }
+
+  /** Map a failed answer to an ApiError, forgetting a dead token. */
+  toError(status, parsed, auth) {
+    const code =
+      (typeof parsed?.code === "string" && parsed.code) ||
+      (typeof parsed?.error === "string" && /^[a-z_]+$/.test(parsed.error) && parsed.error) ||
+      null;
+    const message =
+      (typeof parsed?.error_description === "string" && parsed.error_description) ||
+      (typeof parsed?.error === "string" && parsed.error) ||
+      (typeof parsed?.message === "string" && parsed.message) ||
+      `HTTP ${status}`;
+    if (auth && status === 401 && DEAD_TOKEN_CODES.has(code)) {
+      this.cache.clear();
+    }
+    return new ApiError(status, code, message, parsed);
+  }
+
+  /** Send one request to the API host; network failures become ApiErrors. */
+  async send(method, path, options, accept) {
     const { json, form, auth = true } = options;
-    const headers = { accept: "application/json" };
+    const headers = { accept };
     if (auth) {
       const token = this.cache.token;
       if (!token) {
@@ -140,9 +185,8 @@ export class ApiClient {
       body = JSON.stringify(json);
     }
 
-    let res;
     try {
-      res = await this.fetchImpl(`${this.baseUrl}${path}`, {
+      return await this.fetchImpl(`${this.baseUrl}${path}`, {
         method,
         headers,
         body,
@@ -158,34 +202,17 @@ export class ApiClient {
           : `Could not reach Ads Optimiser at ${this.baseUrl}: ${err?.cause?.code ?? err?.message ?? String(err)}.`
       );
     }
+  }
+}
 
-    let parsed = null;
-    const raw = await res.text().catch(() => "");
-    if (raw) {
-      try {
-        const value = JSON.parse(raw);
-        if (value && typeof value === "object" && !Array.isArray(value)) parsed = value;
-      } catch {
-        // Non-JSON answers (proxies, hard 500s) fall through with parsed = null.
-      }
-    }
-
-    if (!res.ok) {
-      const code =
-        (typeof parsed?.code === "string" && parsed.code) ||
-        (typeof parsed?.error === "string" && /^[a-z_]+$/.test(parsed.error) && parsed.error) ||
-        null;
-      const message =
-        (typeof parsed?.error_description === "string" && parsed.error_description) ||
-        (typeof parsed?.error === "string" && parsed.error) ||
-        (typeof parsed?.message === "string" && parsed.message) ||
-        `HTTP ${res.status}`;
-      if (auth && res.status === 401 && DEAD_TOKEN_CODES.has(code)) {
-        this.cache.clear();
-      }
-      throw new ApiError(res.status, code, message, parsed);
-    }
-    return parsed ?? {};
+/** A JSON object body, else null (non-JSON answers from proxies, hard 500s). */
+function parseJsonObject(raw) {
+  if (!raw) return null;
+  try {
+    const value = JSON.parse(raw);
+    return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+  } catch {
+    return null;
   }
 }
 
