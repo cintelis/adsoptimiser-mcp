@@ -2,6 +2,19 @@
 
 All notable changes to `@cintelisai/adsoptimiser-mcp` are recorded here. Versions follow [semantic versioning](https://semver.org/).
 
+## 0.9.0 (2026-09-28)
+
+### Added
+
+- `adsoptimiser_add_overlays`, the same as the hosted connector's `add_overlays`: burn timed text into a finished video with `POST /api/v1/jobs/overlays`. Pass exactly one source, `video_job_id` or `video_url`, plus `cues` (at most 50, each `{ text, start, end, position?, style? }`: 1 to 200 characters, seconds from the start of the video with 0 <= start < end, position `top`, `center` or `bottom`, style `caption` or `card`) and/or `auto_captions: true`, which has the server transcribe the speech (whisper-1, about US$0.006 per minute) and add word-timed caption chunks at `captions_position` (default `bottom`). An optional `script`, the words you know are spoken, corrects the transcript's spellings. The tool description includes an example of grade cards timed to spoken moments. It is asynchronous: it returns the new job id at once, to follow with `adsoptimiser_get_job`. Rendering counts as one creative job from the plan allowance, not a generation. Only in this package: `video_path`, a local .mp4 or .mov (at most 120 MB) that is checked and uploaded for you first, as for `adsoptimiser_lip_sync`.
+- Only in this package: every rule of the request is checked on your machine before anything is uploaded, sent or charged (exactly one source, at least one cue or auto captions, the cue count, each cue's text length, timing and order, and the position and style values), and every problem is listed at once.
+- `adsoptimiser_get_job` and `adsoptimiser_list_jobs` describe overlay jobs (model `media-overlays`, shown as "overlay video"): the cue count, whether auto captions were added, the transcript's word count, the transcription model and cost, and the source video job, with an `overlays` object in the structured content. `adsoptimiser_get_job` also shows the start of the transcript.
+- The pipeline node catalogue passes the `add_captions` node's new optional params through from the API: `timing` (`even`, or `speech` to time captions to the transcribed speech) and `cues` (timed text, the same shape as above). The local descriptions and a graph rule cover them for older catalogues, and array params now show their item fields and maximum count.
+
+### Changed
+
+- Clear messages for the overlays route's refusals: invalid cues (400 `invalid_cues`, with each problem the server lists), an invalid request (400 `invalid_request`), a source not found (404), not ready (409) or not a video (415), transcription not configured (503 `transcription_not_configured`; pass timed cues instead) and transcription failed (502 `transcription_failed`). On a deployment that predates overlays (403 `token_scope_denied`, or 404 because the route does not exist) the reply says this Ads Optimiser deployment doesn't support overlays yet. A bare 404 with `video_job_id` is told apart by looking the job up.
+
 ## 0.8.0 (2026-09-28)
 
 ### Added

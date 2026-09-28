@@ -42,6 +42,21 @@ export const OPENAI_VOICES = [
 ];
 /** The only lip-sync model enabled on the API. */
 export const LIP_SYNC_MODELS = ["kling-lipsync"];
+
+/** Timed overlays (POST /api/v1/jobs/overlays and the add_captions node's cues). */
+export const MAX_OVERLAY_CUES = 50;
+export const MAX_CUE_TEXT_CHARS = 200;
+export const OVERLAY_POSITIONS = ["top", "center", "bottom"];
+export const OVERLAY_STYLES = ["caption", "card"];
+/** add_captions timing: even (spread across the clip) or speech (transcribed). */
+export const CAPTION_TIMINGS = ["even", "speech"];
+const CUE_FIELDS = {
+  text: { type: "string" },
+  start: { type: "number" },
+  end: { type: "number" },
+  position: { enum: OVERLAY_POSITIONS, optional: true },
+  style: { enum: OVERLAY_STYLES, optional: true },
+};
 const VOICE_PARAM = {
   type: "object",
   one_of: [
@@ -193,6 +208,18 @@ export const PARAM_SPECS = {
       default: "bottom",
       description: "bottom sits in the lower third above TikTok's own caption area.",
     },
+    timing: {
+      type: "string",
+      enum: CAPTION_TIMINGS,
+      description:
+        "Optional. even spreads the words evenly across the clip (as before). speech transcribes the clip's speech (whisper-1, about US$0.006 per minute) and shows each chunk of words as it is spoken; the captions text or script, when given, corrects the transcript's spellings.",
+    },
+    cues: {
+      type: "array",
+      max_items: MAX_OVERLAY_CUES,
+      items: CUE_FIELDS,
+      description: `Optional timed text: at most ${MAX_OVERLAY_CUES} cues, each { text (1 to ${MAX_CUE_TEXT_CHARS} characters), start, end (seconds from the start of the clip, 0 <= start < end), position? (${OVERLAY_POSITIONS.join(", ")}), style? (${OVERLAY_STYLES.join(", ")}) }. card is a bold title card, caption a subtitle line; use cards for points timed to spoken moments.`,
+    },
   },
 };
 
@@ -218,6 +245,7 @@ export const GRAPH_RULES = [
   "Each generate_image, generate_video, image_to_video, extend_video, voiced_video and lip_sync node is one generation from the plan allowance (video nodes, lip_sync included, also count toward the daily video quota); add_voiceover, strip_audio and add_captions are post-processing creative jobs, never generations; text, input_image, character and refine_prompt are free.",
   "A character node (character_id from adsoptimiser_list_characters) feeds a generate_image or voiced_video refs input as ONE connection and fills the free reference slots with its images; it cannot feed image_to_video's image input. Its description is added to that node's prompt and voiced_video uses its default voice when voice_id is omitted.",
   "add_captions burns text into a video: its captions param, else a text node wired into its text input, else the script of the voiced_video (or add_voiceover or lip_sync) it captions.",
+  `add_captions timing: even (omitted) spreads the words across the clip; speech transcribes the clip's speech (whisper-1, about US$0.006 per minute) and shows each chunk as it is spoken, with the captions text or script correcting spellings. Its optional cues param adds timed text: [{"text","start","end","position"?,"style"?}], at most ${MAX_OVERLAY_CUES}, seconds from the start of the clip, style card for a title card timed to a spoken moment. It stays a post-processing creative job, never a generation. Outside a pipeline, adsoptimiser_add_overlays does the same to a finished video.`,
   'add_voiceover voice: its voice param ({"provider":"xai","voice_id"} or {"provider":"openai","voice","instructions"?}, see adsoptimiser_list_voices) or voice_id wins, else the voice of the character the video was made from (a character wired upstream of that video), else eve. OpenAI narration needs a script of at most 4096 characters.',
   "voiced_video (and adsoptimiser_generate_video with a script) only speaks xAI presets: an OpenAI character voice falls back to the character's xai_voice_id, else eve, and the job says so. For a talking clip in an OpenAI (designed) voice with matching mouth movement, use lip_sync.",
   'lip_sync re-animates the mouth in its wired video so the person speaks a line in a designed voice. Script: its script param, else a text node wired into its "script" input, else the run prompt. Voice: its voice ({"provider":"openai","voice","instructions"?} or xai) or voice_id, else the voice of the character upstream of the video, else eve. kling-lipsync (the only model; about US$0.014 per 5s) needs the generating node to set resolution 720p or 1080p and duration 2 to 10; the line must fit the clip (about 15 characters a second, so about 20 words for an 8s clip). The output keeps the new audio, so wire add_captions straight after it (captions default to the script); no strip_audio needed.',
@@ -263,11 +291,12 @@ function apiParams(params) {
     const out = {};
     for (const p of params) {
       if (!p || typeof p.name !== "string") continue;
-      const { name, maxLength, oneOf, enum: values, ...rest } = p;
+      const { name, maxLength, maxItems, oneOf, enum: values, ...rest } = p;
       out[name] = {
         ...rest,
         ...(values ? { enum: values } : {}),
         ...(maxLength !== undefined ? { max_length: maxLength } : {}),
+        ...(maxItems !== undefined ? { max_items: maxItems } : {}),
         ...(oneOf ? { one_of: oneOf } : {}),
       };
     }
@@ -330,15 +359,39 @@ function describeOneOf(variants) {
     .join(" | ");
 }
 
+/**
+ * The fields of an array param's items, as { name: spec } with optional
+ * marked: a field map as the local specs use, or a JSON schema object
+ * ({ properties, required }) as an API may send. null when there are none.
+ */
+function arrayItemFields(items) {
+  if (!items || typeof items !== "object" || Array.isArray(items)) return null;
+  if (items.properties && typeof items.properties === "object") {
+    const required = Array.isArray(items.required) ? items.required : null;
+    const fields = {};
+    for (const [key, spec] of Object.entries(items.properties)) {
+      fields[key] = { ...(spec ?? {}), ...(required && !required.includes(key) ? { optional: true } : {}) };
+    }
+    return Object.keys(fields).length ? fields : null;
+  }
+  if (typeof items.type === "string") return null;
+  return Object.keys(items).length ? items : null;
+}
+
 function describeParam(name, spec) {
   const bits = [];
   if (spec.required) bits.push("required");
   if (Array.isArray(spec.one_of)) {
     bits.push(`object ${describeOneOf(spec.one_of)}${name === "voice" ? ", see adsoptimiser_list_voices" : ""}`);
   }
+  if (spec.type === "array") {
+    const fields = arrayItemFields(spec.items);
+    bits.push(fields ? `list of ${describeOneOf([fields])}` : "list");
+  }
   if (spec.enum) bits.push(spec.enum.join("|"));
   if (spec.min !== undefined || spec.max !== undefined) bits.push(`${spec.min ?? ""}..${spec.max ?? ""}`);
   if (spec.max_length) bits.push(`max ${spec.max_length} chars`);
+  if (spec.max_items) bits.push(`max ${spec.max_items} items`);
   if (spec.default !== undefined) bits.push(`default ${spec.default}`);
   return `${name}${bits.length ? ` (${bits.join(", ")})` : ""}`;
 }
