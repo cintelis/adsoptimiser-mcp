@@ -2,6 +2,18 @@
 
 All notable changes to `@cintelisai/adsoptimiser-mcp` are recorded here. Versions follow [semantic versioning](https://semver.org/).
 
+## 0.6.0 (2026-09-28)
+
+### Added
+
+- **Claude can now see what was generated.** Tools attach small preview images to their results, the same as the hosted connector: `include_thumbnails` on `adsoptimiser_get_job`, `adsoptimiser_generate_image` and `adsoptimiser_get_character` (on by default) and on `adsoptimiser_list_jobs` and `adsoptimiser_list_character_assets` (off by default). Previews come from the API's `GET /api/v1/media/thumbnail` at 384 px, at most 1 per job, 5 reference images per character and 6 per list. Each image is at most 600,000 base64 bytes and a result carries at most 1,500,000 in total; anything over is left out and named. The images follow the text as `image` blocks, after a line naming them in order ("Attached N preview image(s) ... in order: ...") and a line listing what was not previewed and why ("Not previewed: ..."). The structured content is unchanged.
+- Videos are previewed only when a poster frame is stored; otherwise the reply says so. A character's reference images on another host are not previewed ("external URL"), and nothing is fetched from another host.
+
+### Changed
+
+- A preview that fails (not ready, not found, no poster frame, a scaling failure, a timeout) becomes a note in the text, never a tool error. Only in this package: on a deployment that predates previews (the route answers 403 `token_scope_denied`, or 404 because it does not exist) the reply says once that the deployment doesn't serve previews yet, instead of naming each image.
+- The API client has a binary request helper for previews. Like every other API call, it sends the token to the Ads Optimiser API host only.
+
 ## 0.5.0 (2026-09-28)
 
 ### Added
