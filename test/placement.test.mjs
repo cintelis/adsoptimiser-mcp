@@ -449,8 +449,36 @@ describe("placement and input_video (0.10.0)", () => {
       assert.equal(recap.needs_video, true);
       assert.equal(recap.name, "Re-caption a video (your video -> captions)");
       assert.equal(res.structured.templates.find((t) => t.template_id === "product-ad").needs_video, false);
-      assert.match(res.text, /- video-recaption: Re-caption a video \(your video -> captions\)\. .*starts from your video: run it as a graph with an input_video step/);
+      assert.match(res.text, /- video-recaption: Re-caption a video \(your video -> captions\)\. .*starts from your video: pass video_job_id, video_url or a local video_path to adsoptimiser_run_pipeline/);
       assert.match(res.text, /adsoptimiser_add_overlays is simpler/);
+    });
+
+    it("run_pipeline sends a template's video as top-level video_job_id, or uploads video_path", async () => {
+      const byJob = await ctx.call("adsoptimiser_run_pipeline", { template_id: "video-recaption", video_job_id: "job_vid" });
+      assert.equal(byJob.isError, false, byJob.text);
+      assert.deepEqual(bodyOf(posts("/api/v1/pipelines")[0]), { template_id: "video-recaption", video_job_id: "job_vid" });
+      const file = clip();
+      const byPath = await ctx.call("adsoptimiser_run_pipeline", { template_id: "video-recaption", video_path: file });
+      assert.equal(byPath.isError, false, byPath.text);
+      assert.deepEqual(bodyOf(posts("/api/v1/pipelines")[1]), { template_id: "video-recaption", video_url: UPLOADED });
+      assert.equal(posts("/api/v1/jobs/source-media").length, 1);
+    });
+
+    it("run_pipeline refuses two video sources, or one alongside an inline graph", async () => {
+      const two = await ctx.call("adsoptimiser_run_pipeline", {
+        template_id: "video-recaption",
+        video_job_id: "job_vid",
+        video_url: "https://x/media/a.mp4",
+      });
+      assert.equal(two.isError, true);
+      assert.match(two.text, /at most one of video_job_id, video_url or video_path/);
+      const inline = await ctx.call("adsoptimiser_run_pipeline", {
+        graph: recaption({ video_job_id: "job_vid" }),
+        video_job_id: "job_vid",
+      });
+      assert.equal(inline.isError, true);
+      assert.match(inline.text, /set the video on its input_video step/);
+      assert.equal(posts("/api/v1/pipelines").length, 0);
     });
 
     it("the catalogue passes input_video through, with the local path note", async () => {

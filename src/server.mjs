@@ -770,6 +770,21 @@ export const schemas = {
       .describe(
         "Fills every character step that has no character chosen. Required for templates marked needs_character (character-talking-clip, character-scene, character-lip-sync)."
       ),
+    video_job_id: jobId
+      .optional()
+      .describe(
+        "For a template or saved pipeline marked needs_video: a ready video job in this workspace that fills every empty input_video step. Give at most one of video_job_id, video_url or video_path."
+      ),
+    video_url: z
+      .string()
+      .max(2048)
+      .optional()
+      .describe("The same as video_job_id, as the workspace's own /media URL."),
+    video_path: z
+      .string()
+      .max(1024)
+      .optional()
+      .describe("The same as video_job_id, as a local .mp4 or .mov that is checked and uploaded for you first."),
   }),
   get_pipeline_run: z.object({ run_id: jobId }),
   get_pipeline_nodes: z.object({}),
@@ -2144,7 +2159,7 @@ export function createServer(options = {}) {
               t.needs_character ? " (pass character_id to adsoptimiser_run_pipeline)" : ""
             }${
               t.needs_video
-                ? " (starts from your video: run it as a graph with an input_video step whose video_job_id, video_url or local video_path is set; see adsoptimiser_get_pipeline_nodes. To caption one finished video, adsoptimiser_add_overlays is simpler.)"
+                ? " (starts from your video: pass video_job_id, video_url or a local video_path to adsoptimiser_run_pipeline. To caption one finished video, adsoptimiser_add_overlays is simpler.)"
                 : ""
             }`
         ),
@@ -2160,7 +2175,7 @@ export function createServer(options = {}) {
   tool(
     "adsoptimiser_run_pipeline",
     "Run a pipeline",
-    `Start a pipeline run from exactly one of: a template_id or saved graph_id (see adsoptimiser_list_pipelines), or an unsaved graph. An inline graph must use only node types from adsoptimiser_get_pipeline_nodes, keep to ${MAX_GRAPH_NODES} nodes, and should pass adsoptimiser_validate_pipeline first; it is validated again here and not run if invalid. Local image paths in input_image nodes and local video paths in input_video nodes are uploaded for you. character_id fills every character step that has none (required by templates marked needs_character). Each generation step uses plan allowance like a single job (video steps also count toward the daily video quota), so confirm with the user before running. Returns the run id, step count and estimated provider cost; check progress with adsoptimiser_get_pipeline_run.`,
+    `Start a pipeline run from exactly one of: a template_id or saved graph_id (see adsoptimiser_list_pipelines), or an unsaved graph. An inline graph must use only node types from adsoptimiser_get_pipeline_nodes, keep to ${MAX_GRAPH_NODES} nodes, and should pass adsoptimiser_validate_pipeline first; it is validated again here and not run if invalid. Local image paths in input_image nodes and local video paths in input_video nodes are uploaded for you. character_id fills every character step that has none (required by templates marked needs_character). video_job_id, video_url or video_path fills every empty input_video step (required by templates marked needs_video, such as video-recaption). Each generation step uses plan allowance like a single job (video steps also count toward the daily video quota), so confirm with the user before running. Returns the run id, step count and estimated provider cost; check progress with adsoptimiser_get_pipeline_run.`,
     schemas.run_pipeline,
     { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     async (args) => {
@@ -2168,6 +2183,15 @@ export function createServer(options = {}) {
       if (sources.length !== 1) {
         return fail(
           "Pass exactly one of template_id, graph_id (see adsoptimiser_list_pipelines) or graph (an inline pipeline graph)."
+        );
+      }
+      const videoSources = [args.video_job_id, args.video_url, args.video_path].filter((v) => v !== undefined && v !== "");
+      if (videoSources.length > 1) {
+        return fail("Give at most one of video_job_id, video_url or video_path.");
+      }
+      if (videoSources.length && args.graph) {
+        return fail(
+          "For an inline graph, set the video on its input_video step instead of video_job_id, video_url or video_path."
         );
       }
       const start = async () => {
@@ -2189,6 +2213,20 @@ export function createServer(options = {}) {
           body = { graph: resolved.graph };
         } else {
           body = args.graph_id ? { graph_id: args.graph_id } : { template_id: args.template_id };
+          if (args.video_job_id) body.video_job_id = args.video_job_id;
+          if (args.video_url) body.video_url = args.video_url;
+          if (args.video_path) {
+            const file = await inspectLocalMedia(args.video_path, { base: config.cwd, expected: "video" });
+            const { mtimeMs } = await stat(file.path);
+            const key = `${file.path}|${file.size}|${mtimeMs}`;
+            let url = uploadedVideos.get(key);
+            if (!url) {
+              url = (await uploadLocal(file)).source_url;
+              uploadedVideos.set(key, url);
+            }
+            body.video_url = url;
+            uploads.push({ node_id: "input_video", path: file.path, video_url: url });
+          }
         }
         if (args.prompt) body.prompt = args.prompt;
         if (args.character_id) body.character_id = args.character_id;
