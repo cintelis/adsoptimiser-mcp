@@ -299,7 +299,7 @@ describe("pipeline builder tools", () => {
   it("the enums-only fallback still describes character, add_captions and the voice param", () => {
     const vo = compactNodeType({ type: "add_voiceover", label: "Voiceover", enums: { voice_id: ["eve"] } });
     assert.equal(vo.params.voice.type, "object");
-    assert.equal(vo.params.voice.one_of.length, 2);
+    assert.equal(vo.params.voice.one_of.length, 3);
     assert.deepEqual(vo.params.voice_id.enum, ["eve"]);
     const captions = compactNodeType({ type: "add_captions", label: "Captions", enums: { position: ["bottom"] } });
     assert.deepEqual(captions.params.position.enum, ["bottom"]);

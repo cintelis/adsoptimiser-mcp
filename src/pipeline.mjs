@@ -41,7 +41,7 @@ export const OPENAI_VOICES = [
   "cedar",
 ];
 /** The only lip-sync model enabled on the API. */
-export const LIP_SYNC_MODELS = ["kling-lipsync"];
+export const LIP_SYNC_MODELS = ["kling-lipsync", "sync-lipsync-2-pro"];
 
 /** Timed overlays (POST /api/v1/jobs/overlays and the add_captions node's cues). */
 export const MAX_OVERLAY_CUES = 50;
@@ -225,6 +225,10 @@ const VOICE_PARAM = {
         description: "Accent, emotion, intonation, pacing, tone (gpt-4o-mini-tts).",
       },
     },
+    {
+      provider: { const: "elevenlabs" },
+      voice_id: { type: "string", description: "A cloned voice listed for this workspace by adsoptimiser_list_voices." },
+    },
   ],
   description:
     "Narrator voice profile (see adsoptimiser_list_voices). Wins over voice_id and over the character's voice. Omit both to use the voice of the character the video was made from, else eve. OpenAI voices need the deployment's OpenAI key and a script of at most 4096 characters.",
@@ -348,7 +352,8 @@ export const PARAM_SPECS = {
       type: "string",
       enum: LIP_SYNC_MODELS,
       default: "kling-lipsync",
-      description: "Lip-sync model. kling-lipsync: 2 to 10 second clips at 720p or 1080p, about US$0.014 per 5 seconds.",
+      description:
+        "Lip-sync model. kling-lipsync (default): 2 to 10 second clips at 720p or 1080p, about US$0.014 per 5 seconds. sync-lipsync-2-pro: best mouth fidelity, any resolution, clips up to 60 seconds, about US$5 per minute.",
     },
   },
   add_captions: {
@@ -416,9 +421,9 @@ export const GRAPH_RULES = [
   "A character node (character_id from adsoptimiser_list_characters) feeds a generate_image or voiced_video refs input as ONE connection and fills the free reference slots with its images; it cannot feed image_to_video's image input. Its description is added to that node's prompt and voiced_video uses its default voice when voice_id is omitted.",
   "add_captions burns text into a video: its captions param, else a text node wired into its text input, else the script of the voiced_video (or add_voiceover or lip_sync) it captions.",
   `add_captions timing: even (omitted) spreads the words across the clip; speech transcribes the clip's speech (whisper-1, about US$0.006 per minute) and shows each chunk as it is spoken, with the captions text or script correcting spellings. Its optional cues param adds timed text: [{"text","start","end","position"?,"style"?,"y"?,"size"?,"max_width"?}], at most ${MAX_OVERLAY_CUES}, seconds from the start of the clip, style card for a title card timed to a spoken moment. y (${OVERLAY_Y_MIN} to ${OVERLAY_Y_MAX}, 0 is the top) overrides position; size is ${OVERLAY_SIZES.join(", ")}; max_width is ${OVERLAY_MAX_WIDTH_MIN} to ${OVERLAY_MAX_WIDTH_MAX} of the frame width; text may hold \\n line breaks (at most ${MAX_CUE_LINES} lines). In a 9:16 talking clip keep cards out of the upper third, where the face is: y 0.62 or position center. It stays a post-processing creative job, never a generation. Outside a pipeline, adsoptimiser_add_overlays does the same to a finished video.`,
-  'add_voiceover voice: its voice param ({"provider":"xai","voice_id"} or {"provider":"openai","voice","instructions"?}, see adsoptimiser_list_voices) or voice_id wins, else the voice of the character the video was made from (a character wired upstream of that video), else eve. OpenAI narration needs a script of at most 4096 characters.',
+  'add_voiceover voice: its voice param ({"provider":"xai","voice_id"}, {"provider":"openai","voice","instructions"?} or {"provider":"elevenlabs","voice_id"}, see adsoptimiser_list_voices) or voice_id wins, else the voice of the character the video was made from (a character wired upstream of that video), else eve. OpenAI narration needs a script of at most 4096 characters.',
   "voiced_video (and adsoptimiser_generate_video with a script) only speaks xAI presets: an OpenAI character voice falls back to the character's xai_voice_id, else eve, and the job says so. For a talking clip in an OpenAI (designed) voice with matching mouth movement, use lip_sync.",
-  'lip_sync re-animates the mouth in its wired video so the person speaks a line in a designed voice. Script: its script param, else a text node wired into its "script" input, else the run prompt. Voice: its voice ({"provider":"openai","voice","instructions"?} or xai) or voice_id, else the voice of the character upstream of the video, else eve. kling-lipsync (the only model; about US$0.014 per 5s) needs the generating node to set resolution 720p or 1080p and duration 2 to 10; the line must fit the clip (about 15 characters a second, so about 20 words for an 8s clip). The output keeps the new audio, so wire add_captions straight after it (captions default to the script); no strip_audio needed.',
+  'lip_sync re-animates the mouth in its wired video so the person speaks a line in a designed voice. Script: its script param, else a text node wired into its "script" input, else the run prompt. Voice: its voice ({"provider":"elevenlabs","voice_id"}, {"provider":"openai","voice","instructions"?} or xai) or voice_id, else the voice of the character upstream of the video, else eve. kling-lipsync (the default; about US$0.014 per 5s) needs the generating node to set resolution 720p or 1080p and duration 2 to 10; the line must fit the clip (about 15 characters a second, so about 20 words for an 8s clip). sync-lipsync-2-pro (about US$5 per minute) gives the best lips at any resolution and up to 60s. The output keeps the new audio, so wire add_captions straight after it (captions default to the script); no strip_audio needed.',
   "Template character-lip-sync, \"Character talking clip (designed voice)\" (pass character_id; the run prompt is the exact line spoken, about 20 words): refine_prompt (scene from the line) > character > generate_image > image_to_video (8s, 720p) > lip_sync > add_captions. About US$0.72 per run in provider costs.",
   "generate_image with gpt-image-2.5-sunburst (follows detailed specs closely: exact colours, counts, layouts) or gpt-image-2.5-flare (fast), where the deployment lists them: quality low, medium (default), high or auto; aspect_ratio 9:16, 16:9 or 1:1 (9:16 is delivered as 2:3, 1024x1536); no resolution. A Grok image step that fails upstream (5xx or timeout) is retried once on gpt-image-2.5-sunburst when the deployment has an OpenAI key.",
   "input_image needs params.image_url: an https URL, or with this local server an absolute local file path, which is uploaded for you.",
