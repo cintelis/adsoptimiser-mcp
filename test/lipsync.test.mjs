@@ -292,12 +292,13 @@ describe("lip-sync", () => {
       });
     }
 
-    it("offers only kling-lipsync, and never mentions Sync", async () => {
+    it("offers kling-lipsync and sync-lipsync-2-pro, never the unverified Sync 2.0", async () => {
       const { tools } = await ctx.client.listTools();
       const tool = tools.find((t) => t.name === "adsoptimiser_lip_sync");
-      assert.deepEqual(tool.inputSchema.properties.model.enum, ["kling-lipsync"]);
+      assert.deepEqual(tool.inputSchema.properties.model.enum, ["kling-lipsync", "sync-lipsync-2-pro"]);
       assert.deepEqual(tool.inputSchema.required, ["script"]);
-      assert.ok(!/sync[- ]?(lipsync[- ]?)?2|sync 2\.0/i.test(JSON.stringify(tool)));
+      assert.ok(!/sync-lipsync-2"|sync 2\.0/i.test(JSON.stringify(tool)));
+      assert.match(tool.description, /mouth closed and still/);
       assert.match(tool.description, /2 to 10 seconds at 720p or 1080p/);
       assert.match(tool.description, /about 20 words for an 8 second clip/);
     });
@@ -368,7 +369,7 @@ describe("lip-sync", () => {
       const { params, ...rest } = LIP_SYNC_NODE;
       const node = compactNodeType(rest);
       assert.deepEqual(Object.keys(node.params).sort(), ["model", "script", "voice", "voice_id"]);
-      assert.deepEqual(node.params.model.enum, ["kling-lipsync"]);
+      assert.deepEqual(node.params.model.enum, ["kling-lipsync", "sync-lipsync-2-pro"]);
       assert.match(describeNodeType(node), /script \(max 900 chars\)/);
       assert.ok(GRAPH_RULES.some((r) => /Character talking clip \(designed voice\)/.test(r) && /US\$0\.72/.test(r)));
       assert.ok(!GRAPH_RULES.some((r) => /strip_audio then add_voiceover/.test(r)));

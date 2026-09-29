@@ -321,7 +321,9 @@ describe("characters and voices", () => {
     });
 
     const badVoices = [
-      ["an unknown provider", { provider: "elevenlabs", voice_id: "eve" }],
+      ["an unknown provider", { provider: "azure", voice_id: "eve" }],
+      ["an ElevenLabs voice with instructions", { provider: "elevenlabs", voice_id: "Abc123", instructions: "warm" }],
+      ["a malformed ElevenLabs voice id", { provider: "elevenlabs", voice_id: "not a voice!" }],
       ["an unknown OpenAI voice", { provider: "openai", voice: "robot" }],
       ["an extra key", { provider: "xai", voice_id: "eve", instructions: "fast" }],
       ["an xAI voice without voice_id", { provider: "xai" }],

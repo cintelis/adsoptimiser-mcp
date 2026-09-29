@@ -2,6 +2,15 @@
 
 All notable changes to `@cintelisai/adsoptimiser-mcp` are recorded here. Versions follow [semantic versioning](https://semver.org/).
 
+## 0.11.0 (2026-09-29)
+
+### Added
+
+- **Cloned voices (ElevenLabs).** Voice profiles accept `{ "provider": "elevenlabs", "voice_id", "xai_voice_id"? }` for a cloned voice the workspace may use: in `adsoptimiser_lip_sync`, `adsoptimiser_preview_voice`, a character's `voice` (`adsoptimiser_create_character`, `adsoptimiser_update_character`) and a pipeline's `add_voiceover` and `lip_sync` steps. Cloned voices are scoped to their workspaces by the server. Talking videos cannot speak them and fall back to `xai_voice_id`, else eve.
+- `adsoptimiser_list_voices` lists the workspace's cloned voices with the exact profile to pass, and whether they are configured (`elevenlabs_voices`, `elevenlabs_configured`).
+- **Sync LipSync 2 Pro.** `adsoptimiser_lip_sync` (and the pipeline `lip_sync` step) take `model: "sync-lipsync-2-pro"` for the best mouth and teeth fidelity (about US$5 per minute; any resolution, clips up to 60 seconds). Kling stays the default.
+- The lip-sync, video and server descriptions advise lip-syncing a clip where the person faces the camera with the mouth closed and still, not a clip where they are already talking.
+
 ## 0.10.0 (2026-09-28)
 
 ### Added

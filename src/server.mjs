@@ -105,7 +105,11 @@ export const CHARACTER_ASSET_KINDS = ["image", "video", "talking", "lip_sync", "
 export const MAX_LIP_SYNC_VIDEO_BYTES = 100 * 1024 * 1024;
 export const MAX_LIP_SYNC_SCRIPT_CHARS = 900;
 /** Friendly names for models whose ids read poorly in a job summary. */
-export const MODEL_LABELS = { "kling-lipsync": "Kling LipSync", "media-overlays": "Text overlays" };
+export const MODEL_LABELS = {
+  "kling-lipsync": "Kling LipSync",
+  "sync-lipsync-2-pro": "Sync LipSync 2 Pro",
+  "media-overlays": "Text overlays",
+};
 /** The model an overlays job records (a creative job, not a generation). */
 export const OVERLAYS_MODEL = "media-overlays";
 
@@ -355,7 +359,7 @@ const INSTRUCTIONS = [
   "If a tool says it is not connected, call adsoptimiser_connect and give the user the URL and code; after they approve in the browser, call adsoptimiser_finish_connect.",
   "Every generation uses the workspace's monthly plan allowance, so confirm before generating many at once.",
   "Local files: pass absolute paths. Use adsoptimiser_download_job to save finished media to disk.",
-  "For a consistent AI person (influencer, brand ambassador): generate a character sheet, save the best shots with adsoptimiser_create_character (local files via image_paths), then pass character_id to adsoptimiser_generate_image, adsoptimiser_generate_video or adsoptimiser_run_pipeline. Audition voices with adsoptimiser_preview_voice. adsoptimiser_get_character summarises what was made with a character; adsoptimiser_list_character_assets lists it all and saves files locally with download_to. For a talking clip in a designed (OpenAI) voice, lip-sync a finished clip with adsoptimiser_lip_sync, or run the character-lip-sync template.",
+  "For a consistent AI person (influencer, brand ambassador): generate a character sheet, save the best shots with adsoptimiser_create_character (local files via image_paths), then pass character_id to adsoptimiser_generate_image, adsoptimiser_generate_video or adsoptimiser_run_pipeline. Audition voices with adsoptimiser_preview_voice. adsoptimiser_get_character summarises what was made with a character; adsoptimiser_list_character_assets lists it all and saves files locally with download_to. For a talking clip in a designed (OpenAI) or cloned (ElevenLabs) voice, lip-sync a finished clip where the character is not already talking with adsoptimiser_lip_sync (model sync-lipsync-2-pro for the best lips), or run the character-lip-sync template.",
   "To put text on any finished video (title cards timed to spoken moments, or captions timed to the speech with auto_captions), use adsoptimiser_add_overlays: it works on any existing video, with no need to regenerate it or run a pipeline.",
   `To build a pipeline: call adsoptimiser_get_pipeline_nodes first, use only the node types it lists, keep to ${MAX_GRAPH_NODES} nodes, and check the graph with adsoptimiser_validate_pipeline before saving or running it.`,
 ].join(" ");
@@ -412,9 +416,25 @@ export const voiceProfileSchema = z
           ),
       })
       .strict(),
+    z
+      .object({
+        provider: z.literal("elevenlabs"),
+        voice_id: z
+          .string()
+          .regex(/^[A-Za-z0-9]{1,64}$/, "Invalid ElevenLabs voice id")
+          .describe(
+            "A cloned voice listed for this workspace by adsoptimiser_list_voices (ElevenLabs voice id, e.g. a real person's voice)."
+          ),
+        xai_voice_id: voiceId
+          .optional()
+          .describe(
+            "xAI preset talking videos use for this character (they cannot speak ElevenLabs voices). Default eve."
+          ),
+      })
+      .strict(),
   ])
   .describe(
-    "A voice profile: an xAI preset, or an OpenAI voice with delivery instructions (narration and previews)."
+    "A voice profile: an xAI preset, an OpenAI voice with delivery instructions, or an ElevenLabs cloned voice (narration, lip-sync and previews)."
   );
 
 const characterFields = {
@@ -453,7 +473,7 @@ const characterFields = {
     .nullable()
     .optional()
     .describe(
-      "The character's voice (adsoptimiser_list_voices): an xAI preset, or an OpenAI voice with instructions used for voiceovers (talking videos then use xai_voice_id, else eve). null clears it."
+      "The character's voice (adsoptimiser_list_voices): an xAI preset, an OpenAI voice with instructions, or a cloned ElevenLabs voice, the last two used for voiceovers and lip-sync (talking videos then use xai_voice_id, else eve). null clears it."
     ),
   default_voice_id: voiceId
     .optional()
@@ -650,7 +670,9 @@ export const schemas = {
     model: z
       .enum(LIP_SYNC_MODELS)
       .optional()
-      .describe("Lip-sync model: kling-lipsync (the default, about US$0.014 per 5 seconds)."),
+      .describe(
+        "Lip-sync model: kling-lipsync (the default, about US$0.014 per 5 seconds; 2 to 10 second clips at 720p or 1080p) or sync-lipsync-2-pro (best mouth and teeth fidelity, about US$5 per minute, about US$0.70 for an 8 second clip; any resolution, clips up to 60 seconds). Use sync-lipsync-2-pro when the lips must look right, e.g. a real person's face."
+      ),
   }),
   // Cue fields are typed loosely on purpose: the handler checks them all at
   // once (overlayRequestProblems) and lists every problem, before anything
@@ -997,11 +1019,14 @@ export function summarizeCharacter(character) {
   };
 }
 
-/** "leo", or "openai cedar (talking videos: rex)" for an OpenAI voice. */
+/** "leo", or "openai cedar (talking videos: rex)" for an OpenAI or ElevenLabs voice. */
 export function voiceLabel(summary) {
   const voice = summary.voice;
   if (voice?.provider === "openai") {
     return `openai ${voice.voice} (talking videos: ${voice.xai_voice_id ?? "eve"})`;
+  }
+  if (voice?.provider === "elevenlabs") {
+    return `elevenlabs ${voice.voice_id} (cloned; talking videos: ${voice.xai_voice_id ?? "eve"})`;
   }
   return String(voice?.voice_id ?? summary.default_voice_id ?? "none");
 }
@@ -1162,6 +1187,7 @@ export function createServer(options = {}) {
     const voice = params.voice;
     let voiceText = null;
     if (voice?.provider === "openai" && voice.voice) voiceText = `openai ${voice.voice}`;
+    else if (voice?.provider === "elevenlabs" && voice.voice_id) voiceText = `elevenlabs ${voice.voice_id}`;
     else if (voice?.provider === "xai" && voice.voice_id) voiceText = `xai ${voice.voice_id}`;
     else if (typeof params.voice_id === "string") voiceText = `xai ${params.voice_id}`;
     return {
@@ -1802,7 +1828,7 @@ export function createServer(options = {}) {
   tool(
     "adsoptimiser_generate_video",
     "Generate a video",
-    "Start an ad video generation (text-to-video, or image-to-video from source_image_path, source_image_url or source_job_id). Uses one video generation from the plan allowance and counts toward the daily video quota. Returns immediately with a job id; videos take one to several minutes, so check progress with adsoptimiser_get_job. For a consistent AI influencer pass character_id: with script (the exact words) and no source image you get a 9:16 talking-to-camera clip in the character's voice (talking videos speak xAI preset voices; for a designed OpenAI voice, generate the clip at 720p and follow with adsoptimiser_lip_sync); for silent b-roll, animate a scene image of the character (source_job_id from adsoptimiser_generate_image with character_id) and add on-screen text with adsoptimiser_add_overlays or a pipeline's add_captions step.",
+    "Start an ad video generation (text-to-video, or image-to-video from source_image_path, source_image_url or source_job_id). Uses one video generation from the plan allowance and counts toward the daily video quota. Returns immediately with a job id; videos take one to several minutes, so check progress with adsoptimiser_get_job. For a consistent AI influencer pass character_id: with script (the exact words) and no source image you get a 9:16 talking-to-camera clip in the character's voice (talking videos speak xAI preset voices; for a designed OpenAI voice or a cloned ElevenLabs voice, generate a clip at 720p where the character faces the camera with the mouth closed and does not speak (no script), then follow with adsoptimiser_lip_sync); for silent b-roll, animate a scene image of the character (source_job_id from adsoptimiser_generate_image with character_id) and add on-screen text with adsoptimiser_add_overlays or a pipeline's add_captions step.",
     schemas.generate_video,
     { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     async (args) => {
@@ -1878,7 +1904,7 @@ export function createServer(options = {}) {
   tool(
     "adsoptimiser_lip_sync",
     "Lip-sync a video to a line",
-    "Make the person in an existing video say a new line in a designed voice: the script is spoken (OpenAI voice with instructions, or an xAI preset; by default the character's own voice) and the mouth is re-animated to match (Kling LipSync on fal.ai). The source is a finished video job, an https URL or a local .mp4/.mov file (video_path, max 100 MB, uploaded for you). Kling's limits: the clip must be 2 to 10 seconds at 720p or 1080p (generate it at 720p, not 480p), and the speech must fit the clip at about 15 characters a second (about 20 words for an 8 second clip). Uses one video generation from the plan allowance and counts toward the daily video quota (about US$0.014 per 5 seconds of clip). Returns a job id at once; it takes 2 to 5 minutes, so follow it with adsoptimiser_get_job. For a whole character talking clip in one go, run the character-lip-sync template with adsoptimiser_run_pipeline.",
+    "Make the person in an existing video say a new line in a designed voice: the script is spoken (a cloned ElevenLabs voice, an OpenAI voice with instructions, or an xAI preset; by default the character's own voice) and the mouth is re-animated to match (Kling LipSync by default, or Sync LipSync 2 Pro with model sync-lipsync-2-pro for the best lips, on fal.ai). The source is a finished video job, an https URL or a local .mp4/.mov file (video_path, max 100 MB, uploaded for you). Results are best on a clip where the person faces the camera with the mouth closed and still, not already talking. Kling's limits: the clip must be 2 to 10 seconds at 720p or 1080p (generate it at 720p, not 480p). With either model the speech must fit the clip at about 15 characters a second (about 20 words for an 8 second clip). Uses one video generation from the plan allowance and counts toward the daily video quota (about US$0.014 per 5 seconds of clip). Returns a job id at once; it takes 2 to 5 minutes, so follow it with adsoptimiser_get_job. For a whole character talking clip in one go, run the character-lip-sync template with adsoptimiser_run_pipeline.",
     schemas.lip_sync,
     { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     async (args) => {
@@ -2913,7 +2939,7 @@ export function createServer(options = {}) {
   tool(
     "adsoptimiser_list_voices",
     "List voices",
-    "List the voices: xAI presets (talking videos, voiceovers, a character's default_voice_id) and OpenAI gpt-4o-mini-tts voices (voiceovers and previews, steered with instructions such as accent, pacing and tone), plus whether OpenAI voices are configured. Read-only.",
+    "List the voices: xAI presets (talking videos, voiceovers, a character's default_voice_id), OpenAI gpt-4o-mini-tts voices (voiceovers and previews, steered with instructions such as accent, pacing and tone) and this workspace's cloned ElevenLabs voices (voiceovers, lip-sync and previews), plus which providers are configured. Read-only.",
     schemas.list_voices,
     { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     async () => {
@@ -2922,12 +2948,24 @@ export function createServer(options = {}) {
       const openAi = catalog.providers?.openai;
       const openAiVoices = openAi?.voices ?? [];
       const configured = openAi?.configured === true;
+      const eleven = catalog.providers?.elevenlabs;
+      const clonedVoices = Array.isArray(eleven?.voices) ? eleven.voices : [];
       const lines = [
         `xAI preset voices: ${xai.join(", ") || "none"} (talking videos and voiceovers; default eve).`,
         `OpenAI voices (${openAi?.model ?? "gpt-4o-mini-tts"}): ${openAiVoices.join(", ") || "none"} (voiceovers and previews; add instructions for accent, emotion, pacing and tone).`,
         configured
           ? "OpenAI voices are available."
           : `OpenAI voices are not available: ${openAi?.message ?? "not configured on this deployment."}`,
+        ...(clonedVoices.length
+          ? [
+              `Cloned voices (ElevenLabs, this workspace only): ${clonedVoices
+                .map((v) => `${v.label} = {"provider":"elevenlabs","voice_id":"${v.voice_id}"}`)
+                .join(", ")} (voiceovers, lip-sync and previews; talking videos cannot speak them).`,
+              eleven?.configured === false
+                ? `Cloned voices are not available: ${eleven?.message ?? "not configured on this deployment."}`
+                : "Cloned voices are available.",
+            ]
+          : []),
         ...(catalog.rules ?? []).map((rule) => `- ${rule}`),
         "Hear one with adsoptimiser_preview_voice (save_to also saves the mp3 locally) before saving it to a character.",
       ];
@@ -2936,6 +2974,8 @@ export function createServer(options = {}) {
         xai_voice_ids: xai,
         openai_voices: openAiVoices,
         openai_configured: configured,
+        elevenlabs_voices: clonedVoices,
+        elevenlabs_configured: eleven?.configured === true,
         voices: catalog.voices ?? [],
         preview: catalog.preview ?? null,
         rules: catalog.rules ?? [],
@@ -2965,7 +3005,12 @@ export function createServer(options = {}) {
       const preview = await api.request("POST", "/api/v1/voices/preview", {
         json: { voice, ...(text ? { text } : {}), ...(character_id ? { character_id } : {}) },
       });
-      const label = voice.provider === "openai" ? `OpenAI ${voice.voice}` : `xAI ${voice.voice_id}`;
+      const label =
+        voice.provider === "openai"
+          ? `OpenAI ${voice.voice}`
+          : voice.provider === "elevenlabs"
+            ? `ElevenLabs ${voice.voice_id}`
+            : `xAI ${voice.voice_id}`;
       const structured = {
         media_url: preview.media_url,
         content_type: preview.content_type ?? "audio/mpeg",
